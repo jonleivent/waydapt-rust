@@ -106,13 +106,16 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
             owner.set(protocol).expect("should only be set here");
             for message @ Message { owner, new_id_interface, .. } in interface.all_messages() {
                 owner.set(interface).expect("should only be set here");
-                if let Some(target_name) = message.new_id_interface_name() {
-                    if let Some(target) = protocol.find_interface(target_name) {
-                        new_id_interface.set(target).expect("should only be set here");
-                        target.set_parent(interface);
-                    } else {
-                        externals.push(message)
-                    }
+                // Find at-most-one new_id arg with a named interface.  If found, link it to an
+                // interface in this protocol (if it exists), else mark the message as external (to
+                // be linked in a later pass)
+                let Some(target_interface_name) = message.new_id_interface_name() else { continue };
+                if let Some(target) = protocol.find_interface(target_interface_name) {
+                    new_id_interface.set(target).expect("should only be set here");
+                    // Internal linking is bidirectional via the parent on the target interface:
+                    target.set_parent(interface);
+                } else {
+                    externals.push(message)
                 }
             }
         }
@@ -224,22 +227,17 @@ impl<'a> Message<'a> {
     }
 
     fn new_id_interface_name(&self) -> Option<&String> {
-        let mut new_id_arg: Option<&Arg> = None;
-        for arg in self.args.iter().filter(|a| a.typ == Type::NewId) {
-            if let Some(other) = new_id_arg {
-                panic!("{self} has more than one new_id arg: {} and {}", arg.name, other.name)
-            }
-            new_id_arg = Some(arg)
-        }
-        // only wl_registry::bind can have an interface-less new_id arg.  It manages that by
-        // preceeding the new_id arg with a string arg and uint arg for the interface name and
-        // version.
-        match new_id_arg {
+        let mut new_id_args = self.args.iter().filter(|a| a.typ == Type::NewId);
+        let targetless_ok = |name| self.is_wl_registry_bind() && name == "id";
+        let bad = |name| panic!("{self} has new_id arg {name} but no interface name");
+        let target_interface_name = match new_id_args.next() {
             None => None,
             Some(Arg { interface_name: Some(name), .. }) => Some(name),
-            Some(Arg { name, .. }) if self.is_wl_registry_bind() && name == "id" => None,
-            Some(Arg { name, .. }) => panic!("{self} has new_id arg {name} but no interface name"),
-        }
+            Some(Arg { name, .. }) if targetless_ok(name) => None,
+            Some(Arg { name, .. }) => bad(name),
+        };
+        new_id_args.next().is_some() && panic!("{self} has more than one new_id arg");
+        target_interface_name
     }
 }
 
