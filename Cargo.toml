@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 bumpalo = "3.16.0"
-ghost-cell = "0.2.6"
+dlopen2 = "0.7.0"
 quick-xml = "0.31.0"
-singleton-cell = "0.3.1"
-singleton-trait = "0.3.0"
+static_assertions = "1.1.0"

@@ -9,57 +9,38 @@ use quick_xml::{
     Reader,
 };
 
-use std::collections::HashMap;
-
 use bumpalo::Bump;
 
-pub fn parse<'g, 'a, S: Read>(
-    stream: S,
-    interfaces: &'a mut HashMap<&'a str, Vec<&'a Interface<'g, 'a>>>,
-    bump: &'a Bump,
-) -> &'a mut Protocol<'g, 'a> {
+pub fn parse<'a, S: Read>(stream: S, bump: &'a Bump) -> &'a Protocol<'a> {
     let mut reader = Reader::from_reader(BufReader::new(stream));
     reader.trim_text(true).expand_empty_elements(true);
     // Skip first <?xml ... ?> event
     let _ = reader.read_event_into(&mut Vec::new());
-    parse_protocol(reader, interfaces, bump)
+    parse_protocol(reader, bump)
 }
 
 fn decode_utf8_or_panic(txt: Vec<u8>) -> String {
-    match String::from_utf8(txt) {
-        Ok(txt) => txt,
-        Err(e) => panic!(
-            "Invalid UTF8: '{}'",
-            String::from_utf8_lossy(&e.into_bytes())
-        ),
-    }
+    String::from_utf8(txt)
+        .unwrap_or_else(|e| panic!("Invalid UTF8: '{}'", String::from_utf8_lossy(&e.into_bytes())))
 }
 
 fn parse_or_panic<T: FromStr>(txt: &[u8]) -> T {
-    match std::str::from_utf8(txt)
-        .ok()
-        .and_then(|val| val.parse().ok())
-    {
-        Some(version) => version,
-        None => panic!(
-            "Invalid value '{}' for parsing type '{}'",
-            String::from_utf8_lossy(txt),
-            std::any::type_name::<T>()
-        ),
+    if let Ok(s) = std::str::from_utf8(txt) {
+        if let Ok(result) = s.parse() {
+            return result;
+        }
     }
+    panic!(
+        "Invalid value '{}' for parsing type '{}'",
+        String::from_utf8_lossy(txt),
+        std::any::type_name::<T>()
+    )
 }
 
-fn parse_protocol<'g, 'a, R: BufRead>(
-    mut reader: Reader<R>,
-    interfaces: &'a mut HashMap<&'a str, Vec<&'a Interface<'g, 'a>>>,
-    bump: &'a Bump,
-) -> &'a mut Protocol<'g, 'a> {
+fn parse_protocol<'a, R: BufRead>(mut reader: Reader<R>, bump: &'a Bump) -> &'a Protocol<'a> {
     let protocol = match reader.read_event_into(&mut Vec::new()) {
         Ok(Event::Start(bytes)) => {
-            assert!(
-                bytes.name().into_inner() == b"protocol",
-                "Missing protocol toplevel tag"
-            );
+            assert!(bytes.name().into_inner() == b"protocol", "Missing protocol toplevel tag");
             if let Some(attr) = bytes
                 .attributes()
                 .filter_map(|res| res.ok())
@@ -79,10 +60,6 @@ fn parse_protocol<'g, 'a, R: BufRead>(
                 if let b"interface" = bytes.name().into_inner() {
                     let interface = parse_interface(&mut reader, bytes.attributes(), bump);
                     protocol.interfaces.push(interface);
-                    interfaces
-                        .entry(&interface.name)
-                        .and_modify(|v| v.push(interface))
-                        .or_insert(vec![interface]);
                 }
             }
             Ok(Event::End(bytes)) => {
@@ -101,37 +78,27 @@ fn parse_protocol<'g, 'a, R: BufRead>(
     protocol
 }
 
-fn parse_interface<'g, 'a, R: BufRead>(
-    reader: &mut Reader<R>,
-    attrs: Attributes,
-    bump: &'a Bump,
-) -> &'a mut Interface<'g, 'a> {
+fn parse_interface<'a, R: BufRead>(
+    reader: &mut Reader<R>, attrs: Attributes, bump: &'a Bump,
+) -> &'a Interface<'a> {
     let interface = bump.alloc(Interface::new());
     for attr in attrs.filter_map(|res| res.ok()) {
         match attr.key.into_inner() {
             b"name" => interface.name = decode_utf8_or_panic(attr.value.into_owned()),
-            b"version" => interface.version = parse_or_panic(&attr.value),
+            b"version" => interface.parsed_version = parse_or_panic(&attr.value),
             _ => {}
         }
     }
 
     loop {
         match reader.read_event_into(&mut Vec::new()) {
-            Ok(Event::Start(bytes)) => match bytes.name().into_inner() {
-                b"request" => interface.requests.push(parse_request(
-                    reader,
-                    interface.requests.len() as u32,
-                    bytes.attributes(),
-                    bump,
-                )),
-                b"event" => interface.events.push(parse_event(
-                    reader,
-                    interface.events.len() as u32,
-                    bytes.attributes(),
-                    bump,
-                )),
-                _ => {}
-            },
+            Ok(Event::Start(bytes)) => interface.requests.push(parse_message(
+                reader,
+                interface.requests.len() as u32,
+                bytes.attributes(),
+                bytes.name().into_inner(), // event or request
+                bump,
+            )),
             Ok(Event::End(bytes)) if bytes.name().into_inner() == b"interface" => break,
             _ => {}
         }
@@ -140,64 +107,29 @@ fn parse_interface<'g, 'a, R: BufRead>(
     interface
 }
 
-fn parse_request<'g, 'a, R: BufRead>(
-    reader: &mut Reader<R>,
-    opcode: u32,
-    attrs: Attributes,
-    bump: &'a Bump,
-) -> &'a mut Message<'g, 'a> {
-    let request = bump.alloc(Message::new(opcode));
+fn parse_message<'a, R: BufRead>(
+    reader: &mut Reader<R>, opcode: u32, attrs: Attributes, event_or_request: &[u8], bump: &'a Bump,
+) -> &'a Message<'a> {
+    let message = bump.alloc(Message::new(opcode));
     for attr in attrs.filter_map(|res| res.ok()) {
         match attr.key.into_inner() {
-            b"name" => request.name = decode_utf8_or_panic(attr.value.into_owned()),
-            b"since" => request.since = parse_or_panic(&attr.value),
+            b"name" => message.name = decode_utf8_or_panic(attr.value.into_owned()),
+            b"since" => message.since = parse_or_panic(&attr.value),
             _ => {}
         }
     }
 
     loop {
         match reader.read_event_into(&mut Vec::new()) {
-            Ok(Event::Start(bytes)) => {
-                if let b"arg" = bytes.name().into_inner() {
-                    request.args.push(parse_arg(reader, bytes.attributes()))
-                }
+            Ok(Event::Start(bytes)) if bytes.name().into_inner() == b"arg" => {
+                message.args.push(parse_arg(reader, bytes.attributes()))
             }
-            Ok(Event::End(bytes)) if bytes.name().into_inner() == b"request" => break,
+            Ok(Event::End(bytes)) if bytes.name().into_inner() == event_or_request => break,
             _ => {}
         }
     }
 
-    request
-}
-
-fn parse_event<'g, 'a, R: BufRead>(
-    reader: &mut Reader<R>,
-    opcode: u32,
-    attrs: Attributes,
-    bump: &'a Bump,
-) -> &'a mut Message<'g, 'a> {
-    let event = bump.alloc(Message::new(opcode));
-    for attr in attrs.filter_map(|res| res.ok()) {
-        match attr.key.into_inner() {
-            b"name" => event.name = decode_utf8_or_panic(attr.value.into_owned()),
-            b"since" => event.since = parse_or_panic(&attr.value),
-            _ => {}
-        }
-    }
-
-    loop {
-        match reader.read_event_into(&mut Vec::new()) {
-            Ok(Event::Start(bytes)) => {
-                if let b"arg" = bytes.name().into_inner() {
-                    event.args.push(parse_arg(reader, bytes.attributes()))
-                }
-            }
-            Ok(Event::End(bytes)) if bytes.name().into_inner() == b"event" => break,
-            _ => {}
-        }
-    }
-
-    event
+    message
 }
 
 fn parse_arg<R: BufRead>(_reader: &mut Reader<R>, attrs: Attributes) -> Arg {
@@ -206,7 +138,7 @@ fn parse_arg<R: BufRead>(_reader: &mut Reader<R>, attrs: Attributes) -> Arg {
         match attr.key.into_inner() {
             b"name" => arg.name = decode_utf8_or_panic(attr.value.into_owned()),
             b"type" => arg.typ = parse_type(&attr.value),
-            b"interface" => arg.interface = Some(parse_or_panic(&attr.value)),
+            b"interface" => arg.interface_name = Some(parse_or_panic(&attr.value)),
             _ => {}
         }
     }
