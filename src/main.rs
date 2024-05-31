@@ -1,9 +1,12 @@
-pub mod handler;
+extern crate arrayvec;
+extern crate rustix;
+extern crate static_assertions;
+
+pub mod buffers;
+//pub mod handler;
 pub mod parse;
 pub mod postparse;
 pub mod protocol;
-#[macro_use]
-extern crate static_assertions;
 
 fn main() {
     println!("Hello, world!");

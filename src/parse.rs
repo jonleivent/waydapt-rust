@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::protocol::*;
 use std::{
     io::{BufRead, BufReader, Read},
@@ -11,7 +13,7 @@ use quick_xml::{
 
 use bumpalo::Bump;
 
-pub fn parse<'a, S: Read>(stream: S, bump: &'a Bump) -> &'a Protocol<'a> {
+pub fn parse<S: Read>(stream: S, bump: &Bump) -> &Protocol {
     let mut reader = Reader::from_reader(BufReader::new(stream));
     reader.trim_text(true).expand_empty_elements(true);
     // Skip first <?xml ... ?> event
@@ -37,7 +39,7 @@ fn parse_or_panic<T: FromStr>(txt: &[u8]) -> T {
     )
 }
 
-fn parse_protocol<'a, R: BufRead>(mut reader: Reader<R>, bump: &'a Bump) -> &'a Protocol<'a> {
+fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
     let protocol = match reader.read_event_into(&mut Vec::new()) {
         Ok(Event::Start(bytes)) => {
             assert!(bytes.name().into_inner() == b"protocol", "Missing protocol toplevel tag");

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::fmt;
 pub use std::sync::OnceLock;
 
@@ -78,6 +80,10 @@ impl<'a> Interface<'a> {
     // an interface is considered activated if it had its limited_version set during the third pass of postparse
     pub fn is_active(&self) -> bool {
         self.limited_version.get().is_some()
+    }
+
+    pub fn same_as(&self, other: &Interface<'a>) -> bool {
+        std::ptr::eq(self, other)
     }
 }
 
