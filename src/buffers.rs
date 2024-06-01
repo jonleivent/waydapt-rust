@@ -1,6 +1,7 @@
 #![allow(unused)]
 #![forbid(unsafe_code)]
 
+use arrayvec::ArrayVec;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::io::{IoSlice, IoSliceMut};
@@ -189,7 +190,7 @@ mod input_buffer {
             #[cfg(not(target_os = "macos"))]
             let flags = flags | RecvFlags::CMSG_CLOEXEC;
 
-            let mut cmsg_space = vec![0; rustix::cmsg_space!(ScmRights(MAX_FDS_OUT))];
+            let mut cmsg_space = [0; rustix::cmsg_space!(ScmRights(MAX_FDS_OUT))];
             let mut cmsg_buffer = RecvAncillaryBuffer::new(&mut cmsg_space);
             let mut iov = [IoSliceMut::new(buf)];
             let recv = || recvmsg(&self.stream, &mut iov[..], &mut cmsg_buffer, flags);
@@ -222,9 +223,8 @@ mod input_buffer {
     }
 
     pub(crate) struct InBuffer<Config: InBufferConfig> {
-        // there is probably no benefit to allocating storage in-line
-        // instead of in a Vec because if it is in-line, then this
-        // shouldn't be on the stack, otherwise it can be.
+        // there is probably no benefit to allocating storage in-line (using ArrayVec) instead of in
+        // a Vec because if it is in-line, then this shouldn't be on the stack, otherwise it can be.
         storage: Vec<u8>,
         front: usize,
         back: usize,
@@ -353,7 +353,7 @@ mod output_buffer {
             let outfd = self.stream.as_fd();
             if !fds.is_empty() {
                 let iov = [IoSlice::new(data)];
-                let mut cmsg_space = vec![0; rustix::cmsg_space!(ScmRights(fds.len()))];
+                let mut cmsg_space = [0; rustix::cmsg_space!(ScmRights(MAX_FDS_OUT))];
                 let mut cmsg_buffer = SendAncillaryBuffer::new(&mut cmsg_space);
                 cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
                 retry_or_convert(|| sendmsg(outfd, &iov, &mut cmsg_buffer, flags))
@@ -369,6 +369,20 @@ mod output_buffer {
     }
 
     pub(crate) struct OutBuffer<Config: OutBufferConfig> {
+        // Don't use ArrayVec as the chunk type, because chunks may be copied when the VecDeque is
+        // reallocated due to growth.  Maybe we should use a linked list instead?  Unfortunately,
+        // there is no rotate method for link list.  And popping/pushing will copy the ArrayVec.
+        // And even if there were a rotate, we'd need to keep the end pointer into the list somehow.
+        // There would need to be a rotate involving 2 lists.  The only problems with
+        // VecDeque<Vec<u8>> are that growing the VecDeque may do a realloc, and that accessing Vecs
+        // require extra derefs vs ArrayVec.  Ideally, there would be a LinkedList that supported
+        // rotating elements off of one list onto another without copying - then we could implement
+        // this by splitting chunks into 2 lists active_chunks and inactive_chunks, where
+        // active_chunks.front and .back are O(1) accessible.  We can use LinkedList::split_off and
+        // append.
+
+        // Does it make more sense to carry the fds in the chunks?  It can be an ArrayVec with max
+        // MAX_FDS_OUT capacity.  It probably wastes more space in that case, however.
         chunks: VecDeque<Vec<u8>>,
         end: usize, // index into chunks
         fds: VecDeque<OwnedFd>,
@@ -383,11 +397,16 @@ mod output_buffer {
 
     impl<Config: OutBufferConfig> OutBuffer<Config> {
         fn extend(&mut self) {
-            self.chunks.push_back(Vec::with_capacity(MAX_BYTES_OUT))
+            self.chunks.push_back(Vec::with_capacity(MAX_BYTES_OUT));
         }
 
         pub(crate) fn new(stream: Config::Stream) -> Self {
-            let mut s = Self { chunks: VecDeque::new(), end: 0, fds: VecDeque::new(), stream };
+            let mut s = Self {
+                chunks: VecDeque::new(),
+                end: 0,
+                fds: VecDeque::with_capacity(MAX_FDS_OUT),
+                stream,
+            };
             // there must always be at least one chunk:
             s.extend();
             s
@@ -410,13 +429,14 @@ mod output_buffer {
         pub(crate) fn push_fd(&mut self, fd: OwnedFd) {
             self.fds.push_back(fd);
             // this condition prevents the possibility of having fds in the OutBuffer but no msg
-            // data, which can cause starvation of the receiver.  But it only works if this is
-            // called before push.  The issue is that we limit the number of fds sent with a chunk
-            // to MAX_FDS_OUT.  Hence we have to have enough chunks to accommodate the fds.
-            if self.fds.len() / MAX_FDS_OUT > self.end {
+            // data, which can cause starvation of the receiver.  This can happen whenever there are
+            // more fds than can be flushed with the existing data, due to the MAX_FDS_OUT limit.
+            // But it only works if this is called before push (which is the expected workflow).
+            if self.fds.len() > self.end * MAX_FDS_OUT {
+                // We have to start the next chunk because we can't force a flush and hope it works.
+                // It may not work because the kernel socket buffer might be too full.
                 self.start_next_chunk();
-                // TBD - should we flush here?  We know there will be a push soon, so it doesn't
-                // matter.
+                assert!(self.fds.len() <= self.end * MAX_FDS_OUT);
             }
         }
 
@@ -455,7 +475,7 @@ mod output_buffer {
         pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
             let mut total = 0;
             while force || self.needs_flushing() {
-                let flushed = self.flush_one_chunk()?;
+                let flushed = self.flush_first()?;
                 if flushed == 0 {
                     break;
                 }
@@ -464,43 +484,37 @@ mod output_buffer {
             Ok(total)
         }
 
-        fn front(&self) -> &Vec<u8> {
-            &self.chunks[0]
-        }
-
-        fn front_mut(&mut self) -> &mut Vec<u8> {
-            &mut self.chunks[0]
-        }
-
         fn end_mut(&mut self) -> &mut Vec<u8> {
             &mut self.chunks[self.end]
         }
 
-        fn flush_one_chunk(&mut self) -> IoResult<usize> {
-            if self.chunks[0].is_empty() {
+        fn flush_first(&mut self) -> IoResult<usize> {
+            let first_chunk = &mut self.chunks[0];
+            if first_chunk.is_empty() {
                 return Ok(0);
             }
             let nfds = std::cmp::min(self.fds.len(), MAX_FDS_OUT);
             //#[cfg(inactive)]
-            let flushed = {
-                // or Vec::with_capacity(nfds)
-                let mut bfds = arrayvec::ArrayVec::<_, MAX_FDS_OUT>::new();
+            let flushed = if nfds > 0 {
+                let mut bfds = ArrayVec::<_, MAX_FDS_OUT>::new(); // or Vec::with_capacity(nfds)
                 bfds.extend(self.fds.iter().take(nfds).map(OwnedFd::as_fd));
-                self.stream.send(self.front(), &bfds)?
+                self.stream.send(first_chunk, &bfds)?
+            } else {
+                self.stream.send(first_chunk, &[])?
             };
             // doing the following instead of the above block causes a borrow violation - probably a
             // bug in rust-analyzer?
 
-            // let mut bfds = arrayvec::ArrayVec::<_, MAX_FDS_OUT>::new();
+            // let mut bfds = ArrayVec::<_, MAX_FDS_OUT>::new();
             // bfds.extend(self.fds.iter().take(nfds).map(OwnedFd::as_fd));
             // let flushed = self.stream.send(self.front(), &bfds)?;
 
             if (flushed > 0) {
-                assert_eq!(flushed, self.front().len());
+                assert_eq!(flushed, first_chunk.len());
                 // remove flushed fds:
                 self.fds.drain(..nfds);
                 // remove flushed msg data:
-                self.chunks[0].clear();
+                first_chunk.clear();
                 if self.end > 0 {
                     // there are other active chunks
                     if self.chunks.len() - self.end > Config::ALLOWED_EXCESS_CHUNKS {
