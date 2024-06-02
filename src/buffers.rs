@@ -482,7 +482,7 @@ mod output_buffer {
 
         pub(crate) fn needs_flushing(&self) -> bool {
             // true if there's a backlog
-            self.end > 1
+            self.end > 0
         }
 
         pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
