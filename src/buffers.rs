@@ -16,6 +16,7 @@ use rustix::net::{
 
 const MAX_FDS_OUT: usize = 28;
 const MAX_BYTES_OUT: usize = 4096;
+const CMSG_SPACE: usize = rustix::cmsg_space!(ScmRights(MAX_FDS_OUT));
 
 // The overall usage pattern should be:
 // 0. epoll for in socket ready
@@ -151,11 +152,18 @@ mod input_buffer {
     use super::*;
 
     pub(crate) trait InStream {
-        fn receive(&self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
+        fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
     }
 
     pub(crate) struct InUnixStream {
         stream: UnixStream,
+        cmsg_space: [u8; CMSG_SPACE],
+    }
+
+    impl InUnixStream {
+        pub(crate) fn new(stream: UnixStream) -> Self {
+            Self { stream, cmsg_space: [0; CMSG_SPACE] }
+        }
     }
 
     impl AsFd for InUnixStream {
@@ -185,13 +193,12 @@ mod input_buffer {
     }
 
     impl InStream for InUnixStream {
-        fn receive(&self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize> {
+        fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize> {
             let flags = RecvFlags::DONTWAIT;
             #[cfg(not(target_os = "macos"))]
             let flags = flags | RecvFlags::CMSG_CLOEXEC;
 
-            let mut cmsg_space = [0; rustix::cmsg_space!(ScmRights(MAX_FDS_OUT))];
-            let mut cmsg_buffer = RecvAncillaryBuffer::new(&mut cmsg_space);
+            let mut cmsg_buffer = RecvAncillaryBuffer::new(&mut self.cmsg_space);
             let mut iov = [IoSliceMut::new(buf)];
             let recv = || recvmsg(&self.stream, &mut iov[..], &mut cmsg_buffer, flags);
             let bytes = retry_or_convert(recv)?;
@@ -252,7 +259,7 @@ mod input_buffer {
     impl<Config: InBufferConfig> InBuffer<Config> {
         pub(crate) fn new(stream: Config::Stream) -> Self {
             Self {
-                storage: vec![0; MAX_BYTES_OUT * 2],
+                storage: vec![0; MAX_BYTES_OUT * 2], // *2 on purpose!
                 front: 0,
                 back: 0,
                 fds: VecDeque::with_capacity(MAX_FDS_OUT),
@@ -319,11 +326,18 @@ mod output_buffer {
     use super::*;
 
     pub(crate) trait OutStream {
-        fn send(&self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
+        fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
     }
 
     pub(crate) struct OutUnixStream {
         stream: UnixStream,
+        cmsg_space: [u8; CMSG_SPACE],
+    }
+
+    impl OutUnixStream {
+        pub(crate) fn new(stream: UnixStream) -> Self {
+            Self { stream, cmsg_space: [0; CMSG_SPACE] }
+        }
     }
 
     impl AsFd for OutUnixStream {
@@ -345,7 +359,7 @@ mod output_buffer {
     }
 
     impl OutStream for OutUnixStream {
-        fn send(&self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
+        fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
             let flags = SendFlags::DONTWAIT;
             #[cfg(not(target_os = "macos"))]
             let flags = flags | SendFlags::NOSIGNAL;
@@ -353,8 +367,7 @@ mod output_buffer {
             let outfd = self.stream.as_fd();
             if !fds.is_empty() {
                 let iov = [IoSlice::new(data)];
-                let mut cmsg_space = [0; rustix::cmsg_space!(ScmRights(MAX_FDS_OUT))];
-                let mut cmsg_buffer = SendAncillaryBuffer::new(&mut cmsg_space);
+                let mut cmsg_buffer = SendAncillaryBuffer::new(&mut self.cmsg_space);
                 cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
                 retry_or_convert(|| sendmsg(outfd, &iov, &mut cmsg_buffer, flags))
             } else {
@@ -494,7 +507,6 @@ mod output_buffer {
                 return Ok(0);
             }
             let nfds = std::cmp::min(self.fds.len(), MAX_FDS_OUT);
-            //#[cfg(inactive)]
             let flushed = if nfds > 0 {
                 let mut bfds = ArrayVec::<_, MAX_FDS_OUT>::new(); // or Vec::with_capacity(nfds)
                 bfds.extend(self.fds.iter().take(nfds).map(OwnedFd::as_fd));
@@ -502,12 +514,6 @@ mod output_buffer {
             } else {
                 self.stream.send(first_chunk, &[])?
             };
-            // doing the following instead of the above block causes a borrow violation - probably a
-            // bug in rust-analyzer?
-
-            // let mut bfds = ArrayVec::<_, MAX_FDS_OUT>::new();
-            // bfds.extend(self.fds.iter().take(nfds).map(OwnedFd::as_fd));
-            // let flushed = self.stream.send(self.front(), &bfds)?;
 
             if (flushed > 0) {
                 assert_eq!(flushed, first_chunk.len());
@@ -543,6 +549,9 @@ use output_buffer::*;
 type WInBuf = InBuffer<WaydaptInBufferConfig>;
 type WOutBuf = OutBuffer<WaydaptOutBufferConfig>;
 
+type WInStream = <WaydaptInBufferConfig as InBufferConfig>::Stream;
+type WOutStream = <WaydaptOutBufferConfig as OutBufferConfig>::Stream;
+
 pub(crate) trait MessageHandler {
     fn handle<P>(&mut self, msg: &[u8], fds: &mut P, outbufs: &mut [WOutBuf; 2]) -> IoResult<()>
     where
@@ -553,6 +562,24 @@ pub(crate) struct Session<M: MessageHandler> {
     inbufs: [WInBuf; 2],
     outbufs: [WOutBuf; 2],
     handler: M,
+}
+
+impl<M: MessageHandler> Session<M> {
+    pub fn new(
+        handler: M, upin: WInStream, downin: WInStream, upout: WOutStream, downout: WOutStream,
+    ) -> Self {
+        Self {
+            inbufs: [
+                InBuffer::<WaydaptInBufferConfig>::new(upin),
+                InBuffer::<WaydaptInBufferConfig>::new(downin),
+            ],
+            outbufs: [
+                OutBuffer::<WaydaptOutBufferConfig>::new(upout),
+                OutBuffer::<WaydaptOutBufferConfig>::new(downout),
+            ],
+            handler,
+        }
+    }
 }
 
 impl<M: MessageHandler> epollable::Epollable for Session<M> {
