@@ -1,105 +1,81 @@
 #![allow(unused)]
 #![forbid(unsafe_code)]
 
-use arrayvec::ArrayVec;
-use std::collections::VecDeque;
 use std::io::Result as IoResult;
-use std::io::{IoSlice, IoSliceMut};
-use std::marker::PhantomData;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-
-use rustix::net::{
-    recvmsg, send, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
-    SendAncillaryBuffer, SendAncillaryMessage, SendFlags, Shutdown,
-};
 
 const MAX_FDS_OUT: usize = 28;
 const MAX_BYTES_OUT: usize = 4096;
 const CMSG_SPACE: usize = rustix::cmsg_space!(ScmRights(MAX_FDS_OUT));
 
-// The overall usage pattern should be:
-// 0. epoll for in socket ready
-// 1. receive
-// 2. pop msg, parse it, pop its fds
-// 3. handle msg
-// 4. push msg's fds and push msg
-// 5. if have more in msgs in inbuffer, goto 2, else force flush
-// 6. epoll in socket, and out socket if needs_flushing
-// 7. if out socket ready, force flush, goto 6
-// 8. if in socket ready, goto 1
-
-// suppose we try to do a force flush in 5, but the socket is full.  We then epoll in 6, and the
-// socket becomes unfull.  In 7, do we force flush or just flush?  We have to force flush, else the
-// last msg might not get sent.  I think this means that 7 always does a force flush.  Which means
-// the caller never does a unforced flush.
-
-mod epollable {
+mod event_loop {
     use epoll::{CreateFlags, Event, EventData, EventFlags, EventVec};
     use rustix::event::epoll;
     use std::io::Result as IoResult;
-    use std::os::fd::{BorrowedFd, OwnedFd};
+    use std::os::fd::BorrowedFd;
 
-    pub(crate) trait Epollable {
+    pub(crate) trait EventLoop {
         fn in_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>>;
         fn out_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>>;
         fn handle_input(&mut self, fd_index: usize) -> IoResult<()>;
         fn handle_output(&mut self, fd_index: usize) -> IoResult<()>;
+        const EDGE_TRIGGER_INPUT: bool = true;
 
-        fn in_flags() -> EventFlags {
-            EventFlags::IN | EventFlags::ET // Edge Triggered
-        }
-
-        fn must_receive_all() -> bool {
-            Self::in_flags().contains(EventFlags::ET)
-        }
-
-        fn out_flags() -> EventFlags {
-            // The output has to be edge triggered, as we don't want to get an event everytime we
-            // wait while there is room in the kernel socket buffer.  Maybe we force this?
-            EventFlags::OUT | EventFlags::ET // Edge Triggered
-        }
-
-        fn handle_error(
-            &mut self, fd_index: usize, in_len: usize, flags: EventFlags,
-        ) -> IoResult<()> {
+        fn handle_error(&mut self, fd_index: usize, nin: usize, flags: EventFlags) -> IoResult<()> {
             use std::io::{Error, ErrorKind};
+            // TBD - maybe improve error messages for some sets of flags
             Err(Error::new(
                 ErrorKind::ConnectionAborted,
-                format!("{:?}", flags.iter_names().collect::<Vec<_>>()),
+                format!("event flags: {:?}", flags.iter_names().collect::<Vec<_>>()),
             ))
         }
 
-        fn handle_all(
-            &mut self, fd_index: usize, in_len: usize, flags: EventFlags,
-        ) -> IoResult<()> {
-            if flags.intersects(Self::in_flags() | Self::out_flags()) {
-                if fd_index < in_len {
-                    self.handle_input(fd_index)
-                } else {
-                    self.handle_output(fd_index - in_len)
+        // The rest of these shouldn't be overridden.  Should we move them out of the trait?
+
+        fn handle(&mut self, fd_index: usize, nin: usize, flags: EventFlags) -> IoResult<()> {
+            if fd_index < nin {
+                // we only expect input
+                if flags.contains(EventFlags::IN) {
+                    self.handle_input(fd_index)?;
+                }
+                if !flags.difference(EventFlags::IN).is_empty() {
+                    self.handle_error(fd_index, nin, flags)?;
                 }
             } else {
-                self.handle_error(fd_index, in_len, flags)
+                // we only expect output
+                if flags.contains(EventFlags::OUT) {
+                    self.handle_output(fd_index - nin)?;
+                }
+                if !flags.difference(EventFlags::OUT).is_empty() {
+                    self.handle_error(fd_index, nin, flags)?;
+                }
             }
+            Ok(())
         }
 
         fn event_loop(&mut self) -> IoResult<()> {
             let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
             let in_fds = self.in_fds();
             let mut i = 0;
+            let in_flags = if Self::EDGE_TRIGGER_INPUT {
+                EventFlags::IN | EventFlags::ET
+            } else {
+                EventFlags::IN
+            };
             for fd in in_fds {
                 let data = EventData::new_u64(i);
-                epoll::add(&epoll_fd, fd, data, Self::in_flags());
+                epoll::add(&epoll_fd, fd, data, in_flags);
                 i += 1;
             }
-            let in_len = i as usize;
+            let nin = i as usize;
             let out_fds = self.out_fds();
+            // output has to be edge triggered (ET), because otherwise we would get an event
+            // whenever there is room in the kernel socket buffer
+            let out_flags = EventFlags::OUT | EventFlags::ET;
             for fd in out_fds {
                 let data = EventData::new_u64(i);
-                // output has to be edge triggered (ET), because otherwise we would get an event
-                // whenever there is room in the kernel socket buffer
-                epoll::add(&epoll_fd, fd, data, Self::out_flags() | EventFlags::ET);
+                epoll::add(&epoll_fd, fd, data, out_flags);
                 i += 1;
             }
             let mut events = EventVec::with_capacity(i as usize); // would longer help?
@@ -111,7 +87,7 @@ mod epollable {
                 }
                 for Event { flags, data } in events.iter() {
                     let i = data.u64() as usize;
-                    self.handle_all(i, in_len, flags)?;
+                    self.handle(i, nin, flags)?;
                 }
                 events.clear(); // may not be needed
             }
@@ -145,16 +121,16 @@ mod epollable {
 // event loop without other parts.
 
 mod input_buffer {
-    use std::io::empty;
-
-    use rustix::net::RecvMsgReturn;
-
     use super::*;
+    use std::collections::VecDeque;
+    use std::io::empty;
+    use std::marker::PhantomData;
 
     pub(crate) trait InStream {
         fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
     }
 
+    #[derive(Debug)]
     pub(crate) struct InUnixStream {
         stream: UnixStream,
         cmsg_space: [u8; CMSG_SPACE],
@@ -162,7 +138,7 @@ mod input_buffer {
 
     impl InUnixStream {
         pub(crate) fn new(stream: UnixStream) -> Self {
-            Self { stream, cmsg_space: [0; CMSG_SPACE] }
+            Self { stream, cmsg_space: [0u8; CMSG_SPACE] }
         }
     }
 
@@ -180,28 +156,24 @@ mod input_buffer {
         }
     }
 
-    use rustix::io::Errno;
-    fn retry_or_convert<F>(mut f: F) -> IoResult<usize>
-    where
-        F: FnMut() -> Result<RecvMsgReturn, rustix::io::Errno>,
-    {
-        match rustix::io::retry_on_intr(f) {
-            Ok(b) => Ok(b.bytes),
-            Err(Errno::WOULDBLOCK) | Err(Errno::AGAIN) => Ok(0),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     impl InStream for InUnixStream {
         fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize> {
+            use rustix::io::{retry_on_intr, Errno, IoSliceMut};
+            use rustix::net::{recvmsg, RecvFlags, RecvMsgReturn};
+            use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage};
+
             let flags = RecvFlags::DONTWAIT;
             #[cfg(not(target_os = "macos"))]
             let flags = flags | RecvFlags::CMSG_CLOEXEC;
 
             let mut cmsg_buffer = RecvAncillaryBuffer::new(&mut self.cmsg_space);
             let mut iov = [IoSliceMut::new(buf)];
-            let recv = || recvmsg(&self.stream, &mut iov[..], &mut cmsg_buffer, flags);
-            let bytes = retry_or_convert(recv)?;
+            let recv = || recvmsg(&self.stream, &mut iov, &mut cmsg_buffer, flags);
+            let bytes = match retry_on_intr(recv) {
+                Ok(b) => b.bytes,
+                Err(Errno::WOULDBLOCK) | Err(Errno::AGAIN) => 0,
+                Err(e) => return Err(e.into()),
+            };
             if bytes > 0 {
                 let only_fds = |cmsg| match cmsg {
                     RecvAncillaryMessage::ScmRights(fds) => Some(fds),
@@ -229,10 +201,9 @@ mod input_buffer {
         type Stream: InStream + AsFd;
     }
 
+    #[derive(Debug)]
     pub(crate) struct InBuffer<Config: InBufferConfig> {
-        // there is probably no benefit to allocating storage in-line (using ArrayVec) instead of in
-        // a Vec because if it is in-line, then this shouldn't be on the stack, otherwise it can be.
-        storage: Vec<u8>,
+        storage: [u8; MAX_BYTES_OUT * 2], // *2 on purpose!
         front: usize,
         back: usize,
         fds: VecDeque<OwnedFd>,
@@ -259,7 +230,7 @@ mod input_buffer {
     impl<Config: InBufferConfig> InBuffer<Config> {
         pub(crate) fn new(stream: Config::Stream) -> Self {
             Self {
-                storage: vec![0; MAX_BYTES_OUT * 2], // *2 on purpose!
+                storage: [0u8; MAX_BYTES_OUT * 2], // *2 on purpose!
                 front: 0,
                 back: 0,
                 fds: VecDeque::with_capacity(MAX_FDS_OUT),
@@ -279,7 +250,14 @@ mod input_buffer {
 
         pub(crate) fn receive(&mut self) -> IoResult<usize> {
             self.compact();
-            assert!(self.back <= MAX_BYTES_OUT);
+            debug_assert!(self.back <= MAX_BYTES_OUT);
+            // if we have more than MAX_BYTES_OUT available storage, should we allow receive to use
+            // it?  That might cause problems with fds - if we receive too much, we might leave fds
+            // in the kernel socket buffer that we need.  How would this happen?  Suppose that the
+            // kernel socket buffer contains MAX_BYTES_OUT + D data and MAX_FDS_OUT + F fds, and we
+            // have room for all MAX_BYTES_OUT + D data.  We will only take in MAX_FDS_OUT fds,
+            // however, and if the first MAX_BYTES_OUT msgs use all MAX_FDS_OUT fds, then the last D
+            // msgs will be starved of fds.  So we have to limit the message input to MAX_BYTES_OUT.
             let buf = &mut self.storage[self.back..(MAX_BYTES_OUT + self.back)];
             let amount_read = self.stream.receive(buf, &mut self.fds)?;
             self.back += amount_read;
@@ -288,6 +266,7 @@ mod input_buffer {
 
         fn compact(&mut self) {
             let len = self.back - self.front;
+            debug_assert!(len <= MAX_BYTES_OUT);
             // Compacting more often than absolutely necessary has a cost, but it may improve CPU
             // cache friendliness.
             let threshold = match Config::COMPACT_SCHEME {
@@ -306,6 +285,7 @@ mod input_buffer {
         }
     }
 
+    #[derive(Debug)]
     pub(crate) struct WaydaptInBufferConfig;
 
     impl InBufferConfig for WaydaptInBufferConfig {
@@ -324,11 +304,14 @@ mod input_buffer {
 
 mod output_buffer {
     use super::*;
+    use arrayvec::ArrayVec;
+    use std::collections::{LinkedList, VecDeque};
 
     pub(crate) trait OutStream {
         fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
     }
 
+    #[derive(Debug)]
     pub(crate) struct OutUnixStream {
         stream: UnixStream,
         cmsg_space: [u8; CMSG_SPACE],
@@ -336,7 +319,7 @@ mod output_buffer {
 
     impl OutUnixStream {
         pub(crate) fn new(stream: UnixStream) -> Self {
-            Self { stream, cmsg_space: [0; CMSG_SPACE] }
+            Self { stream, cmsg_space: [0u8; CMSG_SPACE] }
         }
     }
 
@@ -346,32 +329,31 @@ mod output_buffer {
         }
     }
 
-    use rustix::io::Errno;
-    fn retry_or_convert<F>(mut f: F) -> IoResult<usize>
-    where
-        F: FnMut() -> rustix::io::Result<usize>,
-    {
-        match rustix::io::retry_on_intr(f) {
-            Ok(b) => Ok(b),
-            Err(Errno::WOULDBLOCK) | Err(Errno::AGAIN) => Ok(0),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     impl OutStream for OutUnixStream {
         fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
+            use rustix::io::{retry_on_intr, Errno, IoSlice, Result};
+            use rustix::net::{send, sendmsg, SendFlags};
+            use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage};
+
             let flags = SendFlags::DONTWAIT;
             #[cfg(not(target_os = "macos"))]
             let flags = flags | SendFlags::NOSIGNAL;
 
             let outfd = self.stream.as_fd();
-            if !fds.is_empty() {
+            let result = if !fds.is_empty() {
+                debug_assert!(fds.len() <= MAX_FDS_OUT);
                 let iov = [IoSlice::new(data)];
                 let mut cmsg_buffer = SendAncillaryBuffer::new(&mut self.cmsg_space);
-                cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
-                retry_or_convert(|| sendmsg(outfd, &iov, &mut cmsg_buffer, flags))
+                let pushed = cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
+                debug_assert!(pushed);
+                retry_on_intr(|| sendmsg(outfd, &iov, &mut cmsg_buffer, flags))
             } else {
-                retry_or_convert(|| send(outfd, data, flags))
+                retry_on_intr(|| send(outfd, data, flags))
+            };
+            match result {
+                Ok(b) => Ok(b),
+                Err(Errno::WOULDBLOCK) | Err(Errno::AGAIN) => Ok(0),
+                Err(e) => Err(e.into()),
             }
         }
     }
@@ -381,6 +363,14 @@ mod output_buffer {
         type Stream: OutStream + AsFd;
     }
 
+    type Chunk = ArrayVec<u8, MAX_BYTES_OUT>;
+    // Either of the following works:
+    type Chunks = LinkedList<Chunk>;
+    //type Chunks = VecDeque<Box<Chunk>>;
+
+    const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
+
+    #[derive(Debug)]
     pub(crate) struct OutBuffer<Config: OutBufferConfig> {
         // Don't use ArrayVec as the chunk type, because chunks may be copied when the VecDeque is
         // reallocated due to growth.  Maybe we should use a linked list instead?  Unfortunately,
@@ -396,11 +386,23 @@ mod output_buffer {
 
         // Does it make more sense to carry the fds in the chunks?  It can be an ArrayVec with max
         // MAX_FDS_OUT capacity.  It probably wastes more space in that case, however.
-        chunks: VecDeque<Vec<u8>>,
-        end: usize, // index into chunks
+        active_chunks: Chunks,
+        inactive_chunks: Chunks,
         fds: VecDeque<OwnedFd>,
         stream: Config::Stream,
     }
+
+    // The interaction between page data and fds is very easy to get wrong.  It is OK to send fds
+    // before they are needed, but not OK to send them later than when they are needed, as the
+    // recvmsg system call cannot receive fds without also receiving some message data.  Similarly,
+    // the send system call cannot send fds without also sending some message data.  This interacts
+    // with the fact that we can only transfer max MAX_FDS_OUT fds per send or recvmsg call.  The
+    // state to stay away from on the sending side is then when there are fds in the output buffer
+    // but no message data to send them with.  The state to stay away from on the receiving side is
+    // having fewer fds in the input buffer than needed by messages in the input buffer.  Hence,
+    // always try sending fds as early as possible up to the MAX_FDS_OUT limit, and when that limit
+    // is reached, try to flush only the accompanying message data (not more!) together with those
+    // fds.
 
     impl<Config: OutBufferConfig> AsFd for OutBuffer<Config> {
         fn as_fd(&self) -> BorrowedFd<'_> {
@@ -409,70 +411,84 @@ mod output_buffer {
     }
 
     impl<Config: OutBufferConfig> OutBuffer<Config> {
-        fn extend(&mut self) {
-            self.chunks.push_back(Vec::with_capacity(MAX_BYTES_OUT));
-        }
-
         pub(crate) fn new(stream: Config::Stream) -> Self {
             let mut s = Self {
-                chunks: VecDeque::new(),
-                end: 0,
+                active_chunks: Default::default(),
+                inactive_chunks: Default::default(),
                 fds: VecDeque::with_capacity(MAX_FDS_OUT),
                 stream,
             };
             // there must always be at least one chunk:
-            s.extend();
+            s.active_chunks.push_back(Default::default());
             s
         }
 
         fn start_next_chunk(&mut self) {
-            self.end += 1;
-            if self.end == self.chunks.len() {
-                self.extend()
+            if !self.inactive_chunks.is_empty() {
+                let mut rest = self.inactive_chunks.split_off(1);
+                debug_assert_eq!(self.inactive_chunks.len(), 1);
+                self.active_chunks.append(&mut self.inactive_chunks);
+                self.inactive_chunks = rest;
+            } else {
+                self.active_chunks.push_back(Default::default());
             }
         }
 
-        pub(crate) fn is_empty(&self) -> bool {
-            self.chunks[0].len() == 0
+        fn is_empty(&self) -> bool {
+            self.active_chunks.front().expect(MUST_HAVE1).len() == 0
+        }
+
+        fn end_mut(&mut self) -> &mut Chunk {
+            self.active_chunks.back_mut().expect(MUST_HAVE1)
+        }
+
+        fn too_many_fds(&self) -> bool {
+            self.fds.len() > self.active_chunks.len() * MAX_FDS_OUT
         }
 
         // for each msg, push fds first, then push the msg.  This is because we want any fds to be
         // associated with the earliest possible data chunk to help prevent fd starvation of the
         // receiver.
-        pub(crate) fn push_fd(&mut self, fd: OwnedFd) {
+        pub(crate) fn push_fd(&mut self, fd: OwnedFd) -> IoResult<()> {
             self.fds.push_back(fd);
-            // this condition prevents the possibility of having fds in the OutBuffer but no msg
-            // data, which can cause starvation of the receiver.  This can happen whenever there are
-            // more fds than can be flushed with the existing data, due to the MAX_FDS_OUT limit.
-            // But it only works if this is called before push (which is the expected workflow).
-            if self.fds.len() > self.end * MAX_FDS_OUT {
-                // We have to start the next chunk because we can't force a flush and hope it works.
-                // It may not work because the kernel socket buffer might be too full.
-                self.start_next_chunk();
-                assert!(self.fds.len() <= self.end * MAX_FDS_OUT);
+            // Prevent the possibility of having fds in the OutBuffer but no msg data, which can
+            // cause starvation of the receiver.  This can happen whenever there are more fds than
+            // can be flushed with the existing data, due to the MAX_FDS_OUT limit.
+            if self.too_many_fds() {
+                self.flush(true)?;
+                if self.too_many_fds() {
+                    self.start_next_chunk();
+                    debug_assert!(!self.too_many_fds());
+                }
             }
+            Ok(())
         }
 
         pub(crate) fn push(&mut self, msg: &[u8]) -> IoResult<usize> {
             let end_chunk = self.end_mut();
             let split_point = MAX_BYTES_OUT - end_chunk.len();
-            if split_point >= msg.len() {
+            let msg_len = msg.len();
+            debug_assert!(msg_len <= MAX_BYTES_OUT);
+            if split_point >= msg_len {
                 // all of msg fits in end chunk
-                end_chunk.extend_from_slice(msg);
+                let r = end_chunk.try_extend_from_slice(msg);
+                debug_assert!(r.is_ok());
             } else {
                 if split_point > 0 {
                     // some of msg fits in end chunk
-                    end_chunk.extend_from_slice(&msg[..split_point]);
+                    let r = end_chunk.try_extend_from_slice(&msg[..split_point]);
+                    debug_assert!(r.is_ok());
                 }
                 self.start_next_chunk();
                 // write rest of msg
-                let end_chunk = self.end_mut();
-                assert!(end_chunk.is_empty());
-                end_chunk.extend_from_slice(&msg[split_point..]);
+                let end_chunk = self.end_mut(); // need recalc due to start_next_chunk
+                debug_assert!(end_chunk.is_empty());
+                let r = end_chunk.try_extend_from_slice(&msg[split_point..]);
+                debug_assert!(r.is_ok());
             }
 
             // This flush is not forced because somewhere up the call chain there is someone
-            // responsible for forcing a flush after all pending msg traffic has been processed.
+            // responsible for forcing a flush after all pending message traffic has been processed.
             // This flush is only for excess (after the first chunk), and is not necessary.  It's
             // benefit is that it may raise the throughput by allowing more parallelism between
             // sender and receiver.  It may also limit the number of chunks needed in this
@@ -480,15 +496,16 @@ mod output_buffer {
             self.flush(false)
         }
 
-        pub(crate) fn needs_flushing(&self) -> bool {
-            // true if there's a backlog
-            self.end > 0
-        }
-
         pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
             let mut total = 0;
-            while force || self.needs_flushing() {
-                let flushed = self.flush_first()?;
+            // self.active_chunks.len() > 1 means that there are chunks waiting to get flushed that
+            // were refused prevoiusly because the kernel socket buffer did not have room - those
+            // should always get flushed if there is now room.  The final chunk should only get
+            // flushed after all pending message traffic has been processed - meaning just before
+            // starting what might be a traffic lull.  Or when we get signalled that there's now
+            // room in the kernel socket buffer for messages we tried to flush previously.
+            while self.active_chunks.len() > 1 || force {
+                let flushed = self.flush_first_chunk()?;
                 if flushed == 0 {
                     break;
                 }
@@ -497,12 +514,8 @@ mod output_buffer {
             Ok(total)
         }
 
-        fn end_mut(&mut self) -> &mut Vec<u8> {
-            &mut self.chunks[self.end]
-        }
-
-        fn flush_first(&mut self) -> IoResult<usize> {
-            let first_chunk = &mut self.chunks[0];
+        fn flush_first_chunk(&mut self) -> IoResult<usize> {
+            let first_chunk = self.active_chunks.front_mut().expect(MUST_HAVE1);
             if first_chunk.is_empty() {
                 return Ok(0);
             }
@@ -514,27 +527,32 @@ mod output_buffer {
             } else {
                 self.stream.send(first_chunk, &[])?
             };
-
-            if (flushed > 0) {
-                assert_eq!(flushed, first_chunk.len());
-                // remove flushed fds:
+            // if flushed == 0, then nothing, not even the fds were flushed
+            if flushed > 0 {
+                // If the flush happened, then we expect the whole chunk was taken:
+                debug_assert_eq!(flushed, first_chunk.len());
+                // remove flushed fds, which will close the corresponding files:
                 self.fds.drain(..nfds);
                 // remove flushed msg data:
                 first_chunk.clear();
-                if self.end > 0 {
-                    // there are other active chunks
-                    if self.chunks.len() - self.end > Config::ALLOWED_EXCESS_CHUNKS {
-                        self.chunks.pop_front();
-                    } else {
-                        self.chunks.rotate_left(1);
+                if self.active_chunks.len() > 1 {
+                    // there are other active chunks, so first_chunk needs to be popped and possibly
+                    // moved to inactive_chunks
+                    let mut rest_active_chunks = self.active_chunks.split_off(1);
+                    debug_assert_eq!(self.active_chunks.len(), 1);
+                    // if we are below the excess threshold, keep it, else let it drop
+                    if self.inactive_chunks.len() < Config::ALLOWED_EXCESS_CHUNKS {
+                        self.inactive_chunks.append(&mut self.active_chunks);
                     }
-                    self.end -= 1;
+                    self.active_chunks = rest_active_chunks;
+                    debug_assert!(!self.active_chunks.is_empty());
                 }
             }
             Ok(flushed)
         }
     }
 
+    #[derive(Debug)]
     pub(crate) struct WaydaptOutBufferConfig;
 
     impl OutBufferConfig for WaydaptOutBufferConfig {
@@ -543,113 +561,105 @@ mod output_buffer {
     }
 }
 
-use input_buffer::*;
-use output_buffer::*;
+mod handler {
+    use super::*;
+    use event_loop::*;
+    use input_buffer::*;
+    use output_buffer::*;
 
-type WInBuf = InBuffer<WaydaptInBufferConfig>;
-type WOutBuf = OutBuffer<WaydaptOutBufferConfig>;
+    type WInBuf = InBuffer<WaydaptInBufferConfig>;
+    type WOutBuf = OutBuffer<WaydaptOutBufferConfig>;
 
-type WInStream = <WaydaptInBufferConfig as InBufferConfig>::Stream;
-type WOutStream = <WaydaptOutBufferConfig as OutBufferConfig>::Stream;
+    type WInStream = <WaydaptInBufferConfig as InBufferConfig>::Stream;
+    type WOutStream = <WaydaptOutBufferConfig as OutBufferConfig>::Stream;
 
-pub(crate) trait MessageHandler {
-    fn handle<P>(&mut self, msg: &[u8], fds: &mut P, outbufs: &mut [WOutBuf; 2]) -> IoResult<()>
-    where
-        P: PopFds;
-}
+    // The implementer of InputHandler and the caller of Session::new have to agree on the order of
+    // the outbufs/streams: which is for sending events (to the client) and which is for sending
+    // requests (to the server).  The code here doesn't care.
+    // TBD: maybe pass in a trait instead of WOutBuf to limit the InputHandler?
+    pub(crate) trait InputHandler {
+        fn handle<P>(
+            &mut self, msg: &[u8], fds: &mut P, outbufs: &mut [WOutBuf; 2],
+        ) -> IoResult<()>
+        where
+            P: PopFds;
+    }
 
-pub(crate) struct Session<M: MessageHandler> {
-    inbufs: [WInBuf; 2],
-    outbufs: [WOutBuf; 2],
-    handler: M,
-}
+    #[derive(Debug)]
+    pub(crate) struct Session<M: InputHandler> {
+        inbufs: [WInBuf; 2],
+        outbufs: [WOutBuf; 2],
+        handler: M,
+    }
 
-impl<M: MessageHandler> Session<M> {
-    pub fn new(
-        handler: M, upin: WInStream, downin: WInStream, upout: WOutStream, downout: WOutStream,
-    ) -> Self {
-        Self {
-            inbufs: [
-                InBuffer::<WaydaptInBufferConfig>::new(upin),
-                InBuffer::<WaydaptInBufferConfig>::new(downin),
-            ],
-            outbufs: [
-                OutBuffer::<WaydaptOutBufferConfig>::new(upout),
-                OutBuffer::<WaydaptOutBufferConfig>::new(downout),
-            ],
-            handler,
+    impl<M: InputHandler> Session<M> {
+        pub(crate) fn new(handler: M, ins: [WInStream; 2], outs: [WOutStream; 2]) -> Self {
+            Self { handler, inbufs: ins.map(InBuffer::new), outbufs: outs.map(OutBuffer::new) }
+        }
+
+        pub(crate) fn run(&mut self) -> IoResult<()> {
+            EventLoop::event_loop(self)
         }
     }
-}
 
-impl<M: MessageHandler> epollable::Epollable for Session<M> {
-    fn in_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
-        self.inbufs.iter().map(|b| b.as_fd())
-    }
-    fn out_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
-        self.outbufs.iter().map(|b| b.as_fd())
-    }
-
-    fn handle_input(&mut self, index: usize) -> IoResult<()> {
-        // It might be beneficial to lump together multiple calls to InBuffer.receive between
-        // epoll::waits.  Doing so would potentially speed up the throughput in high traffic
-        // situations.  Flushes will be done in between automatically if needed.  The downside is
-        // that we potentially starve out the other side - although we don't do anything to provide
-        // for fairness even if we did only one receive at a time.  We could - after an input event
-        // is handled on one stream, we could check the other stream for input before epolling both
-        // again.  Another downside is that we may still get the extra IN events with nothing to
-        // receive.  Does recvmsg with a DONTWAIT flag return a WOULDBLOCK error if there's nothing
-        // to receive?  That would be a problem as well.  What to do about that?  Changed receive so
-        // that it returns 0 in those cases.
-
-        // We could implement fairness by ignoring the index and testing both inbufs every time.
-        // Then the event loop should only call this once.  But is fairness an issue?  It's true
-        // that Wayland is asynchronous, but there's logic higher up that requires synchrony, and
-        // will pause one side vs. the other.  That's after all the reason for sync msgs in the
-        // protocol.
-
-        // If we handle all available input with no limit, then we can use edge triggered IN events,
-        // which may give higher performance: https://thelinuxcode.com/epoll-7-c-function/
-        const MAX_RECEIVES_PER_INPUT: u32 = 1;
-
-        let mut receive_count = 0;
-        while self.inbufs[index].receive()? > 0 {
-            receive_count += 1;
-            // We expect that amount > 0 AND that at least one whole msg is received.  But we can handle
-            // things if that's not the case.
-            let mut msg_count = 0u32;
-            while let Some((msg, fds)) = self.inbufs[index].try_pop() {
-                msg_count += 1;
-                self.handler.handle(msg, fds, &mut self.outbufs)?;
-            }
-            assert!(msg_count > 0);
-            // Only stop if we have reached the input limit AND the input wasn't edge triggered.  If
-            // the input was edge triggered, we are obligated to receive everything until told there
-            // is no more (by receive returning 0).
-            if receive_count >= MAX_RECEIVES_PER_INPUT && !Self::must_receive_all() {
-                break;
-            }
+    impl<M: InputHandler> EventLoop for Session<M> {
+        fn in_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
+            self.inbufs.iter().map(|b| b.as_fd())
         }
-        assert!(receive_count > 0 || MAX_RECEIVES_PER_INPUT > 1);
-        if receive_count > 0 {
-            // If we received anything, we probably generated output.  Usually that will happen on
-            // the opposite outbuf (1-index), but in the future when waydapt can originate its own
-            // messages, it could be either or both.
-            for b in self.outbufs.iter_mut() {
-                // A force flush means we don't know when we will be back here, so we can't wait to
-                // flush because that might starve the receiver.
-                b.flush(/*force:*/ true)?;
-            }
+        fn out_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
+            self.outbufs.iter().map(|b| b.as_fd())
         }
-        Ok(())
-    }
 
-    fn handle_output(&mut self, index: usize) -> IoResult<()> {
-        // If we don't force the flush to include the last partial chunk, what will cause that last
-        // partial chunk to get sent?  Maybe nothing.
-        let amount = self.outbufs[index].flush(/*force:*/ true)?;
-        // should we check the amount flushed?
-        assert!(amount > 0);
-        Ok(())
+        fn handle_input(&mut self, index: usize) -> IoResult<()> {
+            // By trying receive repeatedly until there's nothing left, we can use edge triggered IN
+            // events, which may give higher performance:
+            // https://thelinuxcode.com/epoll-7-c-function/
+            // But we allow level triggered, and also allow limiting receives
+            const MAX_RECEIVES_PER_INPUT: u32 = 1;
+            let mut receive_count = 0;
+            let inbuf = &mut self.inbufs[index];
+            while inbuf.receive()? > 0 {
+                receive_count += 1;
+                // We expect that at least one whole msg is received.  But we can handle things if
+                // that's not the case.
+                let mut msg_count = 0u32;
+                while let Some((msg, fds)) = inbuf.try_pop() {
+                    msg_count += 1;
+                    self.handler.handle(msg, fds, &mut self.outbufs)?;
+                }
+                debug_assert!(msg_count > 0);
+                // Only stop if we have reached the input limit AND the input wasn't edge triggered.
+                // If the input was edge triggered, we must receive everything until told there is
+                // no more (by receive returning 0).
+                if receive_count >= MAX_RECEIVES_PER_INPUT && !Self::EDGE_TRIGGER_INPUT {
+                    break;
+                }
+            }
+            // If MAX_RECEIVES_PER_INPUT > 1, then it might be possible that we were told to handle
+            // input that we already handled in the previous round.  There may be a data race
+            // between us and the kernel that could cause this.  But if we didn't do any receives
+            // this round, it's not a problem.
+            debug_assert!(receive_count > 0 || MAX_RECEIVES_PER_INPUT > 1);
+            if receive_count > 0 {
+                // If we received anything, we probably generated output.  Usually that will happen
+                // on the opposite outbuf (1-index), but in the future when waydapt can originate
+                // its own messages, it could be either or both.
+                for b in self.outbufs.iter_mut() {
+                    // Force flush because we don't know when we will be back here, so waiting to
+                    // flush any part might starve the receiver.
+                    b.flush(/*force:*/ true)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn handle_output(&mut self, index: usize) -> IoResult<()> {
+            // If we don't force the flush to include the last partial chunk, what will cause that
+            // last partial chunk to get sent?  Maybe nothing.  So we have to force it here.
+            let amount = self.outbufs[index].flush(/*force:*/ true)?;
+            // should we check the amount flushed?
+            debug_assert!(amount > 0);
+            Ok(())
+        }
     }
 }
