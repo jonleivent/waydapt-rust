@@ -9,6 +9,8 @@ edition = "2021"
 arrayvec = "0.7.4"
 bumpalo = "3.16.0"
 dlopen2 = "0.7.0"
+getopts = "0.2.21"
+libc = "0.2.155"
 quick-xml = "0.31.0"
 static_assertions = "1.1.0"
 
@@ -20,4 +22,10 @@ features = [
     "fs",
     "net",
     "process",
+]
+
+[dependencies.nix]
+version = "0.29.0"
+features = [
+    "process"
 ]

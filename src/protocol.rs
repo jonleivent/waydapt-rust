@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use crate::for_handlers::MessageHandler;
+use std::collections::VecDeque;
 use std::fmt;
 pub use std::sync::OnceLock;
 
@@ -96,6 +98,7 @@ pub struct Message<'a> {
     pub(crate) owner: OnceLock<&'a Interface<'a>>,
     pub(crate) new_id_interface: OnceLock<&'a Interface<'a>>,
     pub(crate) active: OnceLock<()>, // acts like an atomic bool that can only go from inactive -> active
+    pub(crate) handlers: OnceLock<VecDeque<MessageHandler>>,
 }
 
 impl<'a> Message<'a> {
@@ -108,6 +111,7 @@ impl<'a> Message<'a> {
             owner: OnceLock::new(),
             new_id_interface: OnceLock::new(),
             active: OnceLock::new(),
+            handlers: OnceLock::new(),
         }
     }
 

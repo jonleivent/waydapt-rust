@@ -5,6 +5,7 @@ use bumpalo::Bump;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::File;
+use std::path::PathBuf;
 
 type ActiveInterfaceMap<'a> = HashMap<&'a str, &'a Interface<'a>>;
 
@@ -17,15 +18,15 @@ pub type ActiveInterfaces = ActiveInterfacesA<'static>;
 type InterfaceMap<'a> = HashMap<&'a str, Vec<&'a Interface<'a>>>;
 type AllProtocols<'a> = [&'a Protocol<'a>];
 
-pub fn active_interfaces<'a>(
-    protocol_filenames: impl Iterator<Item = &'a str>, globals_filename: &str,
+pub fn active_interfaces(
+    protocol_filenames: impl Iterator<Item = PathBuf>, globals_filename: &str,
 ) -> &'static ActiveInterfaces {
     static ACTIVE_INTERFACES: OnceLock<&ActiveInterfaces> = OnceLock::new();
     ACTIVE_INTERFACES.get_or_init(|| {
         let bump = Box::leak(Box::new(Bump::new()));
         let mut all_protocols: Vec<&'static Protocol<'static>> = Vec::new();
         let mut maybe_display = None; // wl_display must exist
-        for protocol_filename in protocol_filenames {
+        for ref protocol_filename in protocol_filenames {
             let file = File::open(protocol_filename).unwrap();
             let protocol = super::parse::parse(file, bump);
             if protocol.name == "wayland" {

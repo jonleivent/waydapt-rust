@@ -291,7 +291,6 @@ mod input_buffer {
     impl InBufferConfig for WaydaptInBufferConfig {
         const COMPACT_SCHEME: CompactScheme = CompactScheme::Eager;
         fn get_msg_length(header: &[u8]) -> Option<usize> {
-            // return 0 if not enough room for the header
             let word_2 = u32::from_ne_bytes(header.get(4..8)?.try_into().ok()?);
             Some((word_2 >> 16) as usize)
         }
@@ -390,6 +389,7 @@ mod output_buffer {
         inactive_chunks: Chunks,
         fds: VecDeque<OwnedFd>,
         stream: Config::Stream,
+        pub(crate) flush_every_send: bool,
     }
 
     // The interaction between page data and fds is very easy to get wrong.  It is OK to send fds
@@ -417,6 +417,7 @@ mod output_buffer {
                 inactive_chunks: Default::default(),
                 fds: VecDeque::with_capacity(MAX_FDS_OUT),
                 stream,
+                flush_every_send: false,
             };
             // there must always be at least one chunk:
             s.active_chunks.push_back(Default::default());
@@ -466,7 +467,7 @@ mod output_buffer {
 
         pub(crate) fn push(&mut self, msg: &[u8]) -> IoResult<usize> {
             let end_chunk = self.end_mut();
-            let split_point = MAX_BYTES_OUT - end_chunk.len();
+            let split_point = end_chunk.remaining_capacity();
             let msg_len = msg.len();
             debug_assert!(msg_len <= MAX_BYTES_OUT);
             if split_point >= msg_len {
@@ -487,17 +488,17 @@ mod output_buffer {
                 debug_assert!(r.is_ok());
             }
 
-            // This flush is not forced because somewhere up the call chain there is someone
-            // responsible for forcing a flush after all pending message traffic has been processed.
-            // This flush is only for excess (after the first chunk), and is not necessary.  It's
-            // benefit is that it may raise the throughput by allowing more parallelism between
-            // sender and receiver.  It may also limit the number of chunks needed in this
-            // OutBuffer.
-            self.flush(false)
+            // This flush is not forced (unless flush_every_send is true) because somewhere up the
+            // call chain there is someone responsible for forcing a flush after all pending message
+            // traffic has been processed.  This flush is only for excess (after the first chunk),
+            // and is not necessary.  It's benefit is that it may raise the throughput by allowing
+            // more parallelism between sender and receiver.  It may also limit the number of chunks
+            // needed in this OutBuffer.
+            self.flush(self.flush_every_send)
         }
 
         pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
-            let mut total = 0;
+            let mut total_flushed = 0;
             // self.active_chunks.len() > 1 means that there are chunks waiting to get flushed that
             // were refused prevoiusly because the kernel socket buffer did not have room - those
             // should always get flushed if there is now room.  The final chunk should only get
@@ -505,13 +506,13 @@ mod output_buffer {
             // starting what might be a traffic lull.  Or when we get signalled that there's now
             // room in the kernel socket buffer for messages we tried to flush previously.
             while self.active_chunks.len() > 1 || force {
-                let flushed = self.flush_first_chunk()?;
-                if flushed == 0 {
+                let amount_flushed = self.flush_first_chunk()?;
+                if amount_flushed == 0 {
                     break;
                 }
-                total += flushed;
+                total_flushed += amount_flushed;
             }
-            Ok(total)
+            Ok(total_flushed)
         }
 
         fn flush_first_chunk(&mut self) -> IoResult<usize> {
@@ -520,17 +521,17 @@ mod output_buffer {
                 return Ok(0);
             }
             let nfds = std::cmp::min(self.fds.len(), MAX_FDS_OUT);
-            let flushed = if nfds > 0 {
+            let amount_flushed = if nfds > 0 {
                 let mut bfds = ArrayVec::<_, MAX_FDS_OUT>::new(); // or Vec::with_capacity(nfds)
                 bfds.extend(self.fds.iter().take(nfds).map(OwnedFd::as_fd));
                 self.stream.send(first_chunk, &bfds)?
             } else {
                 self.stream.send(first_chunk, &[])?
             };
-            // if flushed == 0, then nothing, not even the fds were flushed
-            if flushed > 0 {
+            // if amount_flushed == 0, then not even the fds were flushed
+            if amount_flushed > 0 {
                 // If the flush happened, then we expect the whole chunk was taken:
-                debug_assert_eq!(flushed, first_chunk.len());
+                debug_assert_eq!(amount_flushed, first_chunk.len());
                 // remove flushed fds, which will close the corresponding files:
                 self.fds.drain(..nfds);
                 // remove flushed msg data:
@@ -548,7 +549,7 @@ mod output_buffer {
                     debug_assert!(!self.active_chunks.is_empty());
                 }
             }
-            Ok(flushed)
+            Ok(amount_flushed)
         }
     }
 
