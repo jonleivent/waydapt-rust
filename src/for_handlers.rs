@@ -1,5 +1,7 @@
 pub trait MessageData {}
-pub trait SessionInfo {}
+pub trait SessionInfo {
+    fn ucred(&self) -> rustix::net::UCred;
+}
 
 pub type MessageHandler = fn(&mut dyn MessageData, &dyn SessionInfo);
 
