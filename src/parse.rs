@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::pedantic)]
 
+#[allow(clippy::wildcard_imports)]
 use super::protocol::*;
 use std::{
     io::{BufRead, BufReader, Read},
@@ -45,7 +47,7 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
             assert!(bytes.name().into_inner() == b"protocol", "Missing protocol toplevel tag");
             if let Some(attr) = bytes
                 .attributes()
-                .filter_map(|res| res.ok())
+                .filter_map(Result::ok)
                 .find(|attr| attr.key.into_inner() == b"name")
             {
                 bump.alloc(Protocol::new(decode_utf8_or_panic(attr.value.into_owned())))
@@ -53,7 +55,7 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
                 panic!("Protocol must have a name");
             }
         }
-        e => panic!("Ill-formed protocol file: {:?}", e),
+        e => panic!("Ill-formed protocol file: {e:?}"),
     };
 
     loop {
@@ -84,7 +86,7 @@ fn parse_interface<'a, R: BufRead>(
     reader: &mut Reader<R>, attrs: Attributes, bump: &'a Bump,
 ) -> &'a Interface<'a> {
     let interface = bump.alloc(Interface::new());
-    for attr in attrs.filter_map(|res| res.ok()) {
+    for attr in attrs.filter_map(Result::ok) {
         match attr.key.into_inner() {
             b"name" => interface.name = decode_utf8_or_panic(attr.value.into_owned()),
             b"version" => interface.parsed_version = parse_or_panic(&attr.value),
@@ -94,6 +96,7 @@ fn parse_interface<'a, R: BufRead>(
 
     loop {
         match reader.read_event_into(&mut Vec::new()) {
+            #[allow(clippy::cast_possible_truncation)]
             Ok(Event::Start(bytes)) => interface.requests.push(parse_message(
                 reader,
                 interface.requests.len() as u32,
@@ -113,7 +116,7 @@ fn parse_message<'a, R: BufRead>(
     reader: &mut Reader<R>, opcode: u32, attrs: Attributes, event_or_request: &[u8], bump: &'a Bump,
 ) -> &'a Message<'a> {
     let message = bump.alloc(Message::new(opcode));
-    for attr in attrs.filter_map(|res| res.ok()) {
+    for attr in attrs.filter_map(Result::ok) {
         match attr.key.into_inner() {
             b"name" => message.name = decode_utf8_or_panic(attr.value.into_owned()),
             b"since" => message.since = parse_or_panic(&attr.value),
@@ -121,22 +124,27 @@ fn parse_message<'a, R: BufRead>(
         }
     }
 
+    let mut num_fds = 0;
     loop {
         match reader.read_event_into(&mut Vec::new()) {
             Ok(Event::Start(bytes)) if bytes.name().into_inner() == b"arg" => {
-                message.args.push(parse_arg(reader, bytes.attributes()))
+                let arg = parse_arg(reader, bytes.attributes());
+                if arg.typ == Type::Fd {
+                    num_fds += 1;
+                }
+                message.args.push(arg);
             }
             Ok(Event::End(bytes)) if bytes.name().into_inner() == event_or_request => break,
             _ => {}
         }
     }
-
+    message.num_fds = num_fds;
     message
 }
 
 fn parse_arg<R: BufRead>(_reader: &mut Reader<R>, attrs: Attributes) -> Arg {
     let mut arg = Arg::new();
-    for attr in attrs.filter_map(|res| res.ok()) {
+    for attr in attrs.filter_map(Result::ok) {
         match attr.key.into_inner() {
             b"name" => arg.name = decode_utf8_or_panic(attr.value.into_owned()),
             b"type" => arg.typ = parse_type(&attr.value),

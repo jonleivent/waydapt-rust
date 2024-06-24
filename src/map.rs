@@ -1,8 +1,9 @@
+#![warn(clippy::pedantic)]
 #![allow(unused)]
 
 use crate::protocol::Interface;
 
-const WL_SERVER_ID_START: u32 = 0xff000000;
+pub(crate) const WL_SERVER_ID_START: u32 = 0xff00_0000;
 
 type RInterface = &'static Interface<'static>;
 
@@ -20,21 +21,18 @@ impl<const IS_SERVER_SIDE: bool> WaylandObjectMap<IS_SERVER_SIDE> {
         Self { vect: Vec::new() }
     }
 
-    fn normalize_id(&self, id: u32) -> usize {
+    fn normalize_id(id: u32) -> usize {
         if IS_SERVER_SIDE {
-            if id < WL_SERVER_ID_START {
-                panic!("Wrong side id");
-            }
+            assert!(id >= WL_SERVER_ID_START, "Wrong side id");
             (id - WL_SERVER_ID_START) as usize
-        } else if id >= WL_SERVER_ID_START {
-            panic!("Wrong side id");
         } else {
+            assert!(id < WL_SERVER_ID_START, "Wrong side id");
             id as usize
         }
     }
 
     pub(crate) fn lookup(&self, id: u32) -> Option<RInterface> {
-        let id = self.normalize_id(id);
+        let id = Self::normalize_id(id);
         if let Some(ObjectEntry::Live(interface)) = self.vect.get(id) {
             Some(interface)
         } else {
@@ -43,7 +41,7 @@ impl<const IS_SERVER_SIDE: bool> WaylandObjectMap<IS_SERVER_SIDE> {
     }
 
     pub(crate) fn add(&mut self, id: u32, interface: RInterface) {
-        let id = self.normalize_id(id);
+        let id = Self::normalize_id(id);
         if id == self.vect.len() {
             self.vect.push(ObjectEntry::Live(interface));
         } else {
@@ -51,18 +49,16 @@ impl<const IS_SERVER_SIDE: bool> WaylandObjectMap<IS_SERVER_SIDE> {
             if let ObjectEntry::Live(_) = *e {
                 // we trust the server to replace live entries without having seen a delete request
                 // from the client (because there are none):
-                if !IS_SERVER_SIDE {
-                    panic!("Duplicate add")
-                }
+                assert!(IS_SERVER_SIDE, "Duplicate add");
             };
-            *e = ObjectEntry::Live(interface)
+            *e = ObjectEntry::Live(interface);
         }
     }
 
     pub(crate) fn delete(&mut self, id: u32) {
-        let id = self.normalize_id(id);
+        let id = Self::normalize_id(id);
         let Some(e) = self.vect.get_mut(id) else { return };
         let ObjectEntry::Live(interface) = e else { return };
-        *e = ObjectEntry::Deleted(interface)
+        *e = ObjectEntry::Deleted(interface);
     }
 }

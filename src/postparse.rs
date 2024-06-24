@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::pedantic)]
 
+#[allow(clippy::wildcard_imports)]
 use super::protocol::*;
 use bumpalo::Bump;
 use std::cmp::min;
@@ -18,7 +20,7 @@ pub type ActiveInterfaces = ActiveInterfacesA<'static>;
 type InterfaceMap<'a> = HashMap<&'a str, Vec<&'a Interface<'a>>>;
 type AllProtocols<'a> = [&'a Protocol<'a>];
 
-pub fn active_interfaces(
+pub(crate) fn active_interfaces(
     protocol_filenames: impl Iterator<Item = PathBuf>, globals_filename: &str,
 ) -> &'static ActiveInterfaces {
     static ACTIVE_INTERFACES: OnceLock<&ActiveInterfaces> = OnceLock::new();
@@ -30,9 +32,7 @@ pub fn active_interfaces(
             let file = File::open(protocol_filename).unwrap();
             let protocol = super::parse::parse(file, bump);
             if protocol.name == "wayland" {
-                if maybe_display.is_some() {
-                    panic!("Base wayland protocol seen twice")
-                }
+                assert!(maybe_display.is_none(), "Base wayland protocol seen twice");
                 maybe_display = protocol.find_interface("wl_display");
                 let display = maybe_display.expect("Missing interface wl_display");
                 // Because wl_callback violates the single-parent rule (it's the only interface that
@@ -45,9 +45,7 @@ pub fn active_interfaces(
         }
         let display = maybe_display.expect("Missing base wayland protocol");
         let map = postparse(&all_protocols, globals_filename);
-        if !display.is_active() {
-            panic!("wl_display is not active");
-        }
+        assert!(display.is_active(), "wl_display is not active");
         bump.alloc(ActiveInterfacesA { map, display })
     })
 }
@@ -103,8 +101,8 @@ type ExternalsParentless<'a> = (Vec<&'a Message<'a>>, InterfaceMap<'a>);
 fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> ExternalsParentless<'a> {
     let mut externals = Vec::new(); // should only be a few
     let mut parentless: InterfaceMap = HashMap::new(); // potential globals
-    for protocol @ Protocol { interfaces, .. } in protocols.iter() {
-        for interface @ Interface { owner, .. } in interfaces.iter() {
+    for protocol @ Protocol { interfaces, .. } in protocols {
+        for interface @ Interface { owner, .. } in interfaces {
             owner.set(protocol).expect("should only be set here");
             for message @ Message { owner, new_id_interface, .. } in interface.all_messages() {
                 owner.set(interface).expect("should only be set here");
@@ -120,7 +118,7 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
                     target.set_parent(interface);
                 } else {
                     // try later to link to an active interface in another protocol:
-                    externals.push(message)
+                    externals.push(message);
                 }
             }
         }
@@ -136,12 +134,13 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
 
 fn get_globals_limits(parentless: &InterfaceMap, filename: &str) {
     for (n, name, version_limit) in GlobalLimits::iter(filename) {
-        match parentless.get(name.as_str()).map(|v| v.as_slice()) {
+        match parentless.get(name.as_str()).map(Vec::as_slice) {
             Some([interface @ Interface { parsed_version, limited_version, .. }]) => {
                 // a global (or other) interface is considered active if its limited_version is set
-                if limited_version.set(min(version_limit, *parsed_version)).is_err() {
-                    panic!("Multiple entries for {interface} in global limits file {filename} line {n}");
-                }
+                assert!(
+                    limited_version.set(min(version_limit, *parsed_version)).is_ok(),
+                    "Multiple entries for {interface} in global limits file {filename} line {n}"
+                );
                 // activate the owning protocol as well.  Expected to be set multiple times, once for
                 // each global interface, so don't panic:
                 let _ = interface.owning_protocol().active.set(());
@@ -170,11 +169,12 @@ fn propagate_limits_find_actives<'a>(protocols: &AllProtocols<'a>) -> ActiveInte
         active_interfaces.entry(name).and_modify(conflict).or_insert(interface);
         let limit = min(*parsed_version, *global_limit);
         for message in interface.all_messages().filter(|m| m.since <= limit) {
-            message.active.set(()).expect("message.active should only be set here")
+            message.active.set(()).expect("message.active should only be set here");
         }
-        if interface.same_as(global_ancestor) && limited_version.set(limit).is_err() {
-            panic!("non-global interface.limited_version should only be set here");
-        }
+        assert!(
+            interface.same_as(global_ancestor) && limited_version.set(limit).is_ok(),
+            "non-global interface.limited_version should only be set here"
+        );
     }
     active_interfaces
 }
@@ -211,18 +211,26 @@ impl<'a> Interface<'a> {
         // Don't rely on tail recursion
         let mut p = self;
         while let Some(next_p) = p.parent.get() {
-            p = next_p
+            p = next_p;
         }
         p
     }
 }
 
 impl<'a> Message<'a> {
-    fn is_wl_registry_bind(&self) -> bool {
+    pub(crate) fn is_wl_registry_bind(&self) -> bool {
         let owning_interface = self.owner.get().expect("owning_interface should be set");
         let owning_protocol = owning_interface.owner.get().expect("owning_protocol should be set");
         self.name == "bind"
             && owning_interface.name == "wl_registry"
+            && owning_protocol.name == "wayland"
+    }
+
+    pub(crate) fn is_wl_display_sync(&self) -> bool {
+        let owning_interface = self.owner.get().expect("owning_interface should be set");
+        let owning_protocol = owning_interface.owner.get().expect("owning_protocol should be set");
+        self.name == "sync"
+            && owning_interface.name == "wl_display"
             && owning_protocol.name == "wayland"
     }
 
@@ -236,9 +244,7 @@ impl<'a> Message<'a> {
             Some(Arg { name, .. }) if targetless_ok(name) => None,
             Some(Arg { name, .. }) => bad(name),
         };
-        if new_id_args.next().is_some() {
-            panic!("{self} has more than one new_id arg");
-        }
+        assert!(new_id_args.next().is_none(), "{self} has more than one new_id arg");
         target_interface_name
     }
 }
@@ -277,9 +283,8 @@ impl<'a> Iterator for GlobalLimits<'a> {
                 panic!("Missing version limit field for global {name} in global limits file {filename} line {n}")
             };
             let rest: Vec<_> = fields.collect();
-            if !rest.is_empty() {
-                panic!("Extraneous fields {rest:?} for global {name} in global limits file {filename} line {n}")
-            }
+            assert!(rest.is_empty(),
+                "Extraneous fields {rest:?} for global {name} in global limits file {filename} line {n}");
             let Ok(version_limit) = version_field.parse() else {
                 panic!("Malformed version limit field \"{version_field}\" for {name} in global limits file {filename} line {n}")
             };
@@ -299,12 +304,12 @@ impl<'a, T: fmt::Display> fmt::Display for Foster<'a, [T]> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         let mut first = true;
         write!(f, "[")?;
-        for e in self.0.iter() {
+        for e in self.0 {
             if first {
                 first = false;
-                write!(f, "{}", e)?;
+                write!(f, "{e}")?;
             } else {
-                write!(f, ", {}", e)?;
+                write!(f, ", {e}")?;
             }
         }
         write!(f, "]")

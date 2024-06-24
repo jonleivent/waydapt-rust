@@ -1,11 +1,17 @@
+#![warn(clippy::pedantic)]
+
 pub trait MessageData {}
-pub trait SessionInfo {
+pub trait SessionInitInfo {
     fn ucred(&self) -> rustix::net::UCred;
+    // TBD: get method for active interfaces, etc.
 }
 
-pub type MessageHandler = fn(&mut dyn MessageData, &dyn SessionInfo);
+// TBD: Somehow, we have to provide access to the object id maps, which will be in the InputHandler,
+// not the SessionInitInfo.
 
-pub type SessionInitHandler = fn(&dyn SessionInfo);
+pub type MessageHandler = fn(&mut dyn MessageData, &dyn SessionInitInfo);
+
+pub type SessionInitHandler = fn(&dyn SessionInitInfo);
 
 pub trait AddHandler {
     fn request_push_front(

@@ -1,13 +1,17 @@
+#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
+#![forbid(clippy::large_types_passed_by_value)]
+#![forbid(clippy::large_stack_frames)]
 
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
 
-use crate::input_handler::PopFds;
-use crate::streams::{InStream, OutStream};
-use crate::{MAX_BYTES_OUT, MAX_FDS_OUT};
+use crate::input_handler::{OutChannel, PopFds};
+use crate::streams::{InStream, OutStream, MAX_FDS_OUT};
 use arrayvec::ArrayVec;
 use std::collections::{LinkedList, VecDeque};
+
+const MAX_BYTES_OUT: usize = 4096;
 
 type Chunk = ArrayVec<u8, MAX_BYTES_OUT>;
 // Either of the following works:
@@ -92,11 +96,12 @@ pub(crate) struct OutBuffer<S: OutStream> {
     chunks: Chunks,
     free_chunks: Chunks,
     fds: VecDeque<OwnedFd>,
-    flush_every_send: bool,
+    pub(crate) flush_every_send: bool,
     stream: S,
 }
 
 impl<S: OutStream> OutBuffer<S> {
+    #![allow(clippy::default_trait_access)]
     pub(crate) fn new(stream: S) -> Self {
         Self {
             chunks: Default::default(),
@@ -116,17 +121,18 @@ impl<S: OutStream> OutBuffer<S> {
     }
 
     fn start_next_chunk(&mut self) {
-        if !self.free_chunks.is_empty() {
-            let mut rest = self.free_chunks.split_off(1);
+        if self.free_chunks.is_empty() {
+            self.chunks.push_back(Default::default());
+        } else {
+            let rest = self.free_chunks.split_off(1);
             debug_assert_eq!(self.free_chunks.len(), 1);
             self.chunks.append(&mut self.free_chunks);
             self.free_chunks = rest;
-        } else {
-            self.chunks.push_back(Default::default());
         }
     }
 
     fn is_empty(&self) -> bool {
+        #![allow(dead_code)]
         self.chunks.front().expect(MUST_HAVE1).len() == 0
     }
 
@@ -136,24 +142,6 @@ impl<S: OutStream> OutBuffer<S> {
 
     fn too_many_fds(&self) -> bool {
         self.fds.len() > self.chunks.len() * MAX_FDS_OUT
-    }
-
-    // for each msg, push fds first, then push the msg.  This is because we want any fds to be
-    // associated with the earliest possible data chunk to help prevent fd starvation of the
-    // receiver.
-    pub(crate) fn push_fd(&mut self, fd: OwnedFd) -> IoResult<()> {
-        self.fds.push_back(fd);
-        // Prevent the possibility of having fds in the OutBuffer but no msg data, which can
-        // cause starvation of the receiver.  This can happen whenever there are more fds than
-        // can be flushed with the existing data, due to the MAX_FDS_OUT limit.
-        if self.too_many_fds() {
-            self.flush(true)?;
-            if self.too_many_fds() {
-                self.start_next_chunk();
-                debug_assert!(!self.too_many_fds());
-            }
-        }
-        Ok(())
     }
 
     // By not owning the stream, we will need to have the caller of push have access to the mut
@@ -176,38 +164,6 @@ impl<S: OutStream> OutBuffer<S> {
     //
     // But note that recvmsg takes an AsFd, and so does sendmsg.  But that still means borrowing
     // from a common OwnedFd.
-
-    pub(crate) fn push(&mut self, msg: &[u8]) -> IoResult<usize> {
-        let end_chunk = self.end_mut();
-        let split_point = end_chunk.remaining_capacity();
-        let msg_len = msg.len();
-        debug_assert!(msg_len <= MAX_BYTES_OUT);
-        if split_point >= msg_len {
-            // all of msg fits in end chunk
-            let r = end_chunk.try_extend_from_slice(msg);
-            debug_assert!(r.is_ok());
-        } else {
-            if split_point > 0 {
-                // some of msg fits in end chunk
-                let r = end_chunk.try_extend_from_slice(&msg[..split_point]);
-                debug_assert!(r.is_ok());
-            }
-            self.start_next_chunk();
-            // write rest of msg
-            let end_chunk = self.end_mut(); // need recalc due to start_next_chunk
-            debug_assert!(end_chunk.is_empty());
-            let r = end_chunk.try_extend_from_slice(&msg[split_point..]);
-            debug_assert!(r.is_ok());
-        }
-
-        // This flush is not forced (unless flush_every_send is true) because somewhere up the
-        // call chain there is someone responsible for forcing a flush after all pending message
-        // traffic has been processed.  This flush is only for excess (after the first chunk),
-        // and is not necessary.  It's benefit is that it may raise the throughput by allowing
-        // more parallelism between sender and receiver.  It may also limit the number of chunks
-        // needed in this OutBuffer.
-        self.flush(self.flush_every_send)
-    }
 
     pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
         let mut total_flushed = 0;
@@ -262,6 +218,110 @@ impl<S: OutStream> OutBuffer<S> {
             }
         }
         Ok(amount_flushed)
+    }
+}
+
+#[allow(clippy::inline_always)]
+#[inline(always)]
+const fn round4(x: usize) -> usize {
+    (x + 3) & !3
+}
+
+impl<S: OutStream> OutChannel for OutBuffer<S> {
+    // for each msg, push fds first, then push the msg.  This is because we want any fds to be
+    // associated with the earliest possible data chunk to help prevent fd starvation of the
+    // receiver.
+    fn push_fd(&mut self, fd: OwnedFd) -> IoResult<usize> {
+        self.fds.push_back(fd);
+        // Prevent the possibility of having fds in the OutBuffer but no msg data, which can
+        // cause starvation of the receiver.  This can happen whenever there are more fds than
+        // can be flushed with the existing data, due to the MAX_FDS_OUT limit.
+        if self.too_many_fds() {
+            self.flush(true)?;
+            if self.too_many_fds() {
+                self.start_next_chunk();
+                debug_assert!(!self.too_many_fds());
+            }
+        }
+        Ok(0)
+    }
+
+    fn push_u32(&mut self, data: u32) -> IoResult<usize> {
+        let len = std::mem::size_of::<u32>();
+        let end_chunk = self.end_mut();
+        let split_point = end_chunk.remaining_capacity();
+        if split_point >= len {
+            // all of msg fits in end chunk
+            let r = end_chunk.try_extend_from_slice(&data.to_ne_bytes());
+            debug_assert!(r.is_ok());
+        } else {
+            self.start_next_chunk();
+            // write rest of msg
+            let end_chunk = self.end_mut(); // need recalc due to start_next_chunk
+            debug_assert!(end_chunk.is_empty());
+            let r = end_chunk.try_extend_from_slice(&data.to_ne_bytes());
+            debug_assert!(r.is_ok());
+        }
+        Ok(len)
+    }
+
+    fn push_array(&mut self, data: &[u8]) -> IoResult<usize> {
+        // push len first
+        let len = data.len();
+        // The length pushed here is the length of the string/array without padding or len header:
+        #[allow(clippy::cast_possible_truncation)]
+        self.push_u32(len as u32)?;
+        let len4 = round4(len);
+        let mut end_chunk = self.end_mut();
+        let split_point = end_chunk.remaining_capacity();
+        if split_point < len4 {
+            // we don't have to finish the last chunk to start the next
+            self.start_next_chunk();
+            end_chunk = self.end_mut();
+        }
+        let r = end_chunk.try_extend_from_slice(data);
+        debug_assert!(r.is_ok());
+        let pad = len4 - len;
+        if pad > 0 {
+            let r = end_chunk.try_extend_from_slice(&vec![0; pad]);
+            debug_assert!(r.is_ok());
+        }
+        Ok(len4 + std::mem::size_of::<u32>())
+    }
+
+    fn push(&mut self, msg: &[u8]) -> IoResult<usize> {
+        let end_chunk = self.end_mut();
+        let split_point = end_chunk.remaining_capacity();
+        let msg_len = msg.len();
+        debug_assert!(msg_len <= MAX_BYTES_OUT);
+        if split_point >= msg_len {
+            // all of msg fits in end chunk
+            let r = end_chunk.try_extend_from_slice(msg);
+            debug_assert!(r.is_ok());
+        } else {
+            if split_point > 0 {
+                // some of msg fits in end chunk
+                let r = end_chunk.try_extend_from_slice(&msg[..split_point]);
+                debug_assert!(r.is_ok());
+            }
+            self.start_next_chunk();
+            // write rest of msg
+            let end_chunk = self.end_mut(); // need recalc due to start_next_chunk
+            debug_assert!(end_chunk.is_empty());
+            let r = end_chunk.try_extend_from_slice(&msg[split_point..]);
+            debug_assert!(r.is_ok());
+        }
+        Ok(msg_len)
+    }
+
+    fn end_msg(&mut self) -> IoResult<usize> {
+        // This flush is not forced (unless flush_every_send is true) because somewhere up the
+        // call chain there is someone responsible for forcing a flush after all pending message
+        // traffic has been processed.  This flush is only for excess (after the first chunk),
+        // and is not necessary.  It's benefit is that it may raise the throughput by allowing
+        // more parallelism between sender and receiver.  It may also limit the number of chunks
+        // needed in this OutBuffer.
+        self.flush(self.flush_every_send)
     }
 }
 

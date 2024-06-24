@@ -1,3 +1,4 @@
+#![warn(clippy::pedantic)]
 #![allow(unused)]
 #![forbid(unsafe_code)]
 
@@ -53,9 +54,10 @@ impl SocketListener {
             display_name.clone()
         } else {
             let xdg_runtime_dir: PathBuf = env::var("XDG_RUNTIME_DIR").unwrap().into();
-            if !xdg_runtime_dir.is_absolute() {
-                panic!("XDG_RUNTIME_DIR is not absolute: {xdg_runtime_dir:?}")
-            }
+            assert!(
+                xdg_runtime_dir.is_absolute(),
+                "XDG_RUNTIME_DIR is not absolute: {xdg_runtime_dir:?}"
+            );
             xdg_runtime_dir.join(display_name)
         };
         let lock_path = socket_path.with_extension("lock");
@@ -127,8 +129,9 @@ pub(crate) fn get_server_socket_path() -> PathBuf {
         panic!("XDG_RUNTIME_DIR is not set")
     };
     let xdg_runtime_path = PathBuf::from(xdg_runtime_dir);
-    if !xdg_runtime_path.is_absolute() {
-        panic!("XDG_RUNTIME_DIR is not absolute: {xdg_runtime_path:?}")
-    }
+    assert!(
+        xdg_runtime_path.is_absolute(),
+        "XDG_RUNTIME_DIR is not absolute: {xdg_runtime_path:?}"
+    );
     xdg_runtime_path.join(socket_path)
 }

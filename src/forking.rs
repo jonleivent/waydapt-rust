@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 use nix::sys::wait::{waitpid, WaitPidFlag};
 use nix::unistd::fork;
 pub(crate) use nix::unistd::ForkResult;

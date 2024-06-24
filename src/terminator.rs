@@ -1,3 +1,4 @@
+#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -31,8 +32,9 @@ impl SessionTerminator {
 
 impl Drop for SessionTerminator {
     fn drop(&mut self) {
-        use crate::multithread_exit::*;
+        use crate::multithread_exit::{multithread_exit, ExitCode};
         use std::thread::{panicking, sleep};
+        // fetch_sub returns the value prior to the subtract, so test against 1 intstead of 0:
         if CLIENT_SESSION_COUNT.fetch_sub(1, Ordering::Release) == 1 {
             let saved_client_session_total = CLIENT_SESSION_TOTAL.load(Ordering::Relaxed);
             // All we care about is if CLIENT_SESSION_TOTAL got incremented while we were

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::pedantic)]
 
 use crate::for_handlers::MessageHandler;
 use std::collections::VecDeque;
@@ -79,6 +80,15 @@ impl<'a> Interface<'a> {
         self.requests.iter().chain(self.events.iter()).copied()
     }
 
+    // TBD: mabye have these two panic with a suitable message if the opcode is out of range:
+    pub fn get_request(&self, opcode: usize) -> &Message<'a> {
+        self.requests[opcode]
+    }
+
+    pub fn get_event(&self, opcode: usize) -> &Message<'a> {
+        self.events[opcode]
+    }
+
     // an interface is considered activated if it had its limited_version set during the third pass of postparse
     pub fn is_active(&self) -> bool {
         self.limited_version.get().is_some()
@@ -99,10 +109,11 @@ pub struct Message<'a> {
     pub(crate) new_id_interface: OnceLock<&'a Interface<'a>>,
     pub(crate) active: OnceLock<()>, // acts like an atomic bool that can only go from inactive -> active
     pub(crate) handlers: OnceLock<VecDeque<MessageHandler>>,
+    pub num_fds: u32,
 }
 
 impl<'a> Message<'a> {
-    pub fn new(opcode: u32) -> Message<'a> {
+    pub(crate) fn new(opcode: u32) -> Message<'a> {
         Message {
             name: String::new(),
             since: 1,
@@ -112,11 +123,24 @@ impl<'a> Message<'a> {
             new_id_interface: OnceLock::new(),
             active: OnceLock::new(),
             handlers: OnceLock::new(),
+            num_fds: 0,
         }
+    }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
     }
 
     pub fn is_active(&self) -> bool {
         self.active.get().is_some()
+    }
+
+    pub fn get_args(&self) -> &[Arg] {
+        &self.args
+    }
+
+    pub fn get_new_id_interface(&self) -> Option<&Interface<'a>> {
+        self.new_id_interface.get().copied()
     }
 }
 
