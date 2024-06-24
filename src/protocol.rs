@@ -89,6 +89,14 @@ impl<'a> Interface<'a> {
         self.events[opcode]
     }
 
+    pub fn get_message(&self, from_server: bool, opcode: usize) -> &Message<'a> {
+        if from_server {
+            self.get_event(opcode)
+        } else {
+            self.get_request(opcode)
+        }
+    }
+
     // an interface is considered activated if it had its limited_version set during the third pass of postparse
     pub fn is_active(&self) -> bool {
         self.limited_version.get().is_some()

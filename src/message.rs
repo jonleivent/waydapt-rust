@@ -5,6 +5,7 @@
 use crate::input_handler::{IdMap, OutChannel, PopFds};
 use crate::map::WL_SERVER_ID_START;
 use crate::protocol::{Interface, Message, Type};
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
@@ -45,10 +46,10 @@ enum ArgData<'a> {
     Int(i32),
     Uint(u32),
     Fixed(i32),
-    String(&'a [u8]),
+    String(Cow<'a, [u8]>),
     Object(u32),
     NewId(u32, &'static Interface<'static>),
-    Array(&'a [u8]),
+    Array(Cow<'a, [u8]>),
     Fd(usize), // index into fds
 }
 
@@ -87,12 +88,12 @@ impl<'a> DemarshalledMessage<'a> {
     fn add_string(&mut self, data: &'a [u8]) -> usize {
         let len = bytes2u32(&data[0..4]) as usize + 4;
         // should we check that len and the zero termination match? TBD
-        self.args.push(ArgData::String(&data[4..len]));
+        self.args.push(ArgData::String(Cow::from(&data[4..len])));
         len
     }
     fn add_array(&mut self, data: &'a [u8]) -> usize {
         let len = bytes2u32(&data[0..4]) as usize + 4;
-        self.args.push(ArgData::Array(&data[4..len]));
+        self.args.push(ArgData::Array(Cow::from(&data[4..len])));
         len
     }
     fn add_fd(&mut self, fd: OwnedFd) -> usize {
@@ -141,13 +142,7 @@ impl<'a> DemarshalledMessage<'a> {
     ) -> Self {
         assert_eq!(header.size, data.len());
         let interface = id_map.lookup(header.object_id);
-
-        let msg_decl = if from_server {
-            interface.get_event(header.opcode)
-        } else {
-            interface.get_request(header.opcode)
-        };
-
+        let msg_decl = interface.get_message(from_server, header.opcode);
         let mut s = Self {
             msg_decl,
             header,
@@ -168,9 +163,9 @@ impl<'a> DemarshalledMessage<'a> {
                 ArgData::Int(i) => out.push_u32(*i as u32),
                 ArgData::Uint(u) => out.push_u32(*u),
                 ArgData::Fixed(f) => out.push_u32(*f as u32),
-                ArgData::String(s) => out.push_array(s),
+                ArgData::String(s) => out.push_array(s, true),
                 ArgData::Object(id) | ArgData::NewId(id, _) => out.push_u32(*id),
-                ArgData::Array(a) => out.push_array(a),
+                ArgData::Array(a) => out.push_array(a, false),
                 ArgData::Fd(_) => Ok(0),
             }?;
         }
@@ -191,3 +186,29 @@ impl<'a> DemarshalledMessage<'a> {
         out.push(self.source)
     }
 }
+
+// How do lifetimes figure into message handling?  Suppose we want to handle a message and alter a
+// string arg.  If we can send the message during the lifetime of the string, then we don't need to
+// copy it.  Also, how would we copy it - the DemarshalledMessage<'a> lifetime will be longer than
+// anything created during the handler.  Maybe the string and array args should contain Cows?
+
+// For the string arg, there's really 3 states.  One is raw str pointing into the buffer.  The
+// second and third is a Cow<'_, str> which is formed using from_utf8_lossy from the raw str.  But
+// what if we don't want any utf8 conversion?  The Wayland protocol uses utf8 strings, though.  But
+// the handler might want to do something that doesn't lose any content in the string even if it
+// isn't legal utf8, like add a prefix.  So maybe a Cow<'a, [u8]>, with the responsibility on the
+// handler if it wants to deal with utf8, it has to convert back to u8.
+
+// The format of the string is 0-terminated, with the len not including the 0, but the size padded
+// to 4 bytes.  We will assume that if we demarshal the message for handlers, that the handlers can
+// modify the demarshalled message - so no output_all_unmodified optimization in this code path.
+
+// For fds, we can also use a Cow in the Fd arg, keeping a BorrowedFd there initially with the
+// matching OwnedFd in the vec.  Does that work?  No, we cannot have both an OwnedFd that is free to
+// be moved and a BorrowedFd on it.  Instead, keep the vec of Owned and the Fd arg indexing into
+// that, and use std::mem::swap from handlers to set it.  What if we ever want the handler to
+// examine the fd by borrowing it?  It can call try_clone on it without swapping it - and maybe swap
+// it later.
+
+// Another possibility is that we store the Args in a VecDeque and pop them on output.  Then the Fds
+// can contain OwnedFds, and handlers can swap them, and we don't need a separate fd VecDeque.

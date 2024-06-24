@@ -15,7 +15,7 @@ pub(crate) trait OutChannel {
 
     fn push_u32(&mut self, data: u32) -> IoResult<usize>;
 
-    fn push_array(&mut self, data: &[u8]) -> IoResult<usize>;
+    fn push_array(&mut self, data: &[u8], zero_term: bool) -> IoResult<usize>;
 
     fn end_msg(&mut self) -> IoResult<usize>;
 

@@ -265,9 +265,9 @@ impl<S: OutStream> OutChannel for OutBuffer<S> {
         Ok(len)
     }
 
-    fn push_array(&mut self, data: &[u8]) -> IoResult<usize> {
+    fn push_array(&mut self, data: &[u8], zero_term: bool) -> IoResult<usize> {
         // push len first
-        let len = data.len();
+        let len = data.len() + usize::from(zero_term);
         // The length pushed here is the length of the string/array without padding or len header:
         #[allow(clippy::cast_possible_truncation)]
         self.push_u32(len as u32)?;
@@ -281,6 +281,10 @@ impl<S: OutStream> OutChannel for OutBuffer<S> {
         }
         let r = end_chunk.try_extend_from_slice(data);
         debug_assert!(r.is_ok());
+        if zero_term {
+            // add 0 terminator for strings
+            end_chunk.push(0);
+        }
         let pad = len4 - len;
         if pad > 0 {
             let r = end_chunk.try_extend_from_slice(&vec![0; pad]);
