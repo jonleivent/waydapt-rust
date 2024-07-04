@@ -84,6 +84,8 @@ fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
     // the remainder of all_args will be name args -- name args -- ...., so we need to break it
     // up into portions using take_while.
 
+    crate::input_handler::add_builtin_handlers(all_handlers);
+
     // Call init handlers for modules in the order that their names appear on the command line:
     loop {
         let Some(handler_mod_name) = all_args.next() else { break };
@@ -97,20 +99,21 @@ fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
     all_handlers
 }
 
+// Could we instead provide an impl for AddHandler that directly sets active_interfaces?  No we
+// can't because we're using OnceLocks, which can only be modified once.
 fn link_message_handlers(all_handlers: &mut AllHandlers, active_interfaces: &ActiveInterfaces) {
     // Link the message handlers to their messages:
     for (interface_name, interface_handlers) in &mut all_handlers.message_handlers {
-        let Some(active_interface) = active_interfaces.maybe_get_interface(interface_name) else {
-            continue;
-        };
-        for (name, request_handlers) in interface_handlers.request_handlers.drain() {
-            if let Some(request) = active_interface.requests.iter().find(|m| m.name == *name) {
-                request.handlers.set(request_handlers).expect("should only be set once");
+        if let Some(interface) = active_interfaces.maybe_get_interface(interface_name) {
+            for (name, request_handlers) in interface_handlers.request_handlers.drain() {
+                if let Some(request) = interface.get_request_by_name(name) {
+                    request.handlers.set(request_handlers).expect("should only be set once");
+                }
             }
-        }
-        for (name, event_handlers) in interface_handlers.event_handlers.drain() {
-            if let Some(event) = active_interface.events.iter().find(|m| m.name == *name) {
-                event.handlers.set(event_handlers).expect("should only be set once");
+            for (name, event_handlers) in interface_handlers.event_handlers.drain() {
+                if let Some(event) = interface.get_event_by_name(name) {
+                    event.handlers.set(event_handlers).expect("should only be set once");
+                }
             }
         }
     }
@@ -269,6 +272,10 @@ pub(crate) fn startup() -> ExitCode {
 
     let active_interfaces = active_interfaces(all_protocol_files, &globals_filename);
 
+    // TBD: should we pass active_interfaces to each init_handler so it can examine which interfaces
+    // and messages are active?  If not, then it might be the case that an init_handler tries to add
+    // a handler to an inactive message.  We could even have the init_handler search through
+    // interfaces and messages to see what it needs to do.
     let all_handlers = get_all_handlers(all_args);
 
     link_message_handlers(all_handlers, active_interfaces);

@@ -97,13 +97,23 @@ fn parse_interface<'a, R: BufRead>(
     loop {
         match reader.read_event_into(&mut Vec::new()) {
             #[allow(clippy::cast_possible_truncation)]
-            Ok(Event::Start(bytes)) => interface.requests.push(parse_message(
-                reader,
-                interface.requests.len() as u32,
-                bytes.attributes(),
-                bytes.name().into_inner(), // event or request
-                bump,
-            )),
+            Ok(Event::Start(bytes)) => {
+                let event_or_request = bytes.name().into_inner();
+                let is_request = event_or_request == b"request";
+                let msg = parse_message(
+                    reader,
+                    interface.requests.len() as u32,
+                    bytes.attributes(),
+                    event_or_request, // event or request
+                    is_request,
+                    bump,
+                );
+                if is_request {
+                    interface.requests.push(msg);
+                } else {
+                    interface.events.push(msg);
+                }
+            }
             Ok(Event::End(bytes)) if bytes.name().into_inner() == b"interface" => break,
             _ => {}
         }
@@ -113,9 +123,11 @@ fn parse_interface<'a, R: BufRead>(
 }
 
 fn parse_message<'a, R: BufRead>(
-    reader: &mut Reader<R>, opcode: u32, attrs: Attributes, event_or_request: &[u8], bump: &'a Bump,
+    reader: &mut Reader<R>, opcode: u32, attrs: Attributes, event_or_request: &[u8],
+    is_request: bool, bump: &'a Bump,
 ) -> &'a Message<'a> {
     let message = bump.alloc(Message::new(opcode));
+    message.is_request = is_request;
     for attr in attrs.filter_map(Result::ok) {
         match attr.key.into_inner() {
             b"name" => message.name = decode_utf8_or_panic(attr.value.into_owned()),

@@ -89,6 +89,14 @@ impl<'a> Interface<'a> {
         self.events[opcode]
     }
 
+    pub(crate) fn get_request_by_name(&self, name: &str) -> Option<&Message<'a>> {
+        self.requests.iter().find(|m| m.name == name).copied()
+    }
+
+    pub(crate) fn get_event_by_name(&self, name: &str) -> Option<&Message<'a>> {
+        self.events.iter().find(|m| m.name == name).copied()
+    }
+
     pub fn get_message(&self, from_server: bool, opcode: usize) -> &Message<'a> {
         if from_server {
             self.get_event(opcode)
@@ -118,6 +126,7 @@ pub struct Message<'a> {
     pub(crate) active: OnceLock<()>, // acts like an atomic bool that can only go from inactive -> active
     pub(crate) handlers: OnceLock<VecDeque<MessageHandler>>,
     pub num_fds: u32,
+    pub is_request: bool,
 }
 
 impl<'a> Message<'a> {
@@ -132,6 +141,7 @@ impl<'a> Message<'a> {
             active: OnceLock::new(),
             handlers: OnceLock::new(),
             num_fds: 0,
+            is_request: false,
         }
     }
 

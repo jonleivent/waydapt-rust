@@ -3,19 +3,11 @@
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
+use crate::basics::{init_array, MAX_FDS_OUT};
+use crate::crate_traits::{InStream, OutStream};
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-
-pub(crate) const MAX_FDS_OUT: usize = 28;
-
-pub(crate) trait InStream {
-    fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
-}
-
-pub(crate) trait OutStream {
-    fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
-}
 
 const CMSG_SPACE: usize = rustix::cmsg_space!(ScmRights(MAX_FDS_OUT));
 
@@ -23,10 +15,6 @@ const CMSG_SPACE: usize = rustix::cmsg_space!(ScmRights(MAX_FDS_OUT));
 pub(crate) struct IOStream {
     stream: UnixStream,
     cmsg_space: [u8; CMSG_SPACE],
-}
-
-fn init_array<T: Copy, const N: usize>(init_element: T) -> [T; N] {
-    [init_element; N]
 }
 
 impl IOStream {

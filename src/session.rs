@@ -2,11 +2,10 @@
 #![forbid(unsafe_code)]
 
 use crate::buffers::{InBuffer, OutBuffer};
-use crate::event_loop::EventLoop;
+use crate::crate_traits::EventHandler;
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
-use crate::input_handler::{InputHandler, WaydaptInputHandler};
+use crate::input_handler::WaydaptInputHandler;
 use crate::postparse::ActiveInterfaces;
-use crate::setup::WaydaptOptions;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
@@ -14,30 +13,34 @@ use std::os::unix::io::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 
 #[derive(Debug)]
-pub(crate) struct Session {
+pub(crate) struct Session<'a> {
     // I don't think we want the bufs to own the streams, because there are 4 bufs and only2
     // streams.  Instead, we should own the streams and the buffs should borrow them.  TBD
     in_buffers: [InBuffer; 2],
     out_buffers: [OutBuffer<IOStream>; 2],
+    messenger: WaydaptInputHandler<'a>,
 }
 
-impl Session {
-    pub(crate) fn new(options: &WaydaptOptions, streams: [UnixStream; 2]) -> Self {
+impl<'a> Session<'a> {
+    pub(crate) fn new(init_info: &WaydaptSessionInitInfo, streams: [UnixStream; 2]) -> Self {
         let mut s = Self {
             in_buffers: Default::default(),
             out_buffers: streams.map(IOStream::new).map(OutBuffer::new),
+            messenger: WaydaptInputHandler::new(init_info),
         };
-        s.out_buffers.iter_mut().for_each(|b| b.flush_every_send = options.flush_every_send);
+        s.out_buffers
+            .iter_mut()
+            .for_each(|b| b.flush_every_send = init_info.options.flush_every_send);
         s
     }
 }
 
-impl EventLoop for Session {
-    fn fds(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
+impl<'a> EventHandler for Session<'a> {
+    fn fds_to_monitor(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
         self.out_buffers.iter().map(|b| b.get_stream().as_fd())
     }
 
-    fn handle_input<A: InputHandler>(&mut self, handler: &mut A, index: usize) -> IoResult<()> {
+    fn handle_input(&mut self, index: usize) -> IoResult<()> {
         // By trying receive repeatedly until there's nothing left, we can use edge triggered IN
         // events, which may give higher performance:
         // https://thelinuxcode.com/epoll-7-c-function/
@@ -51,7 +54,7 @@ impl EventLoop for Session {
                 msg_count += 1;
 
                 // We need to pass index into handle so it knows whether the msg is a request or event.
-                handler.handle(index, msg, fds, &mut self.out_buffers)?;
+                self.messenger.handle(index, msg, fds, &mut self.out_buffers)?;
             }
             debug_assert!(msg_count > 0);
         }
@@ -81,7 +84,7 @@ impl EventLoop for Session {
 ////////////////////////////////////////////////////////////////////////////////
 
 pub(crate) struct WaydaptSessionInitInfo {
-    ucred: rustix::net::UCred,
+    pub(crate) ucred: rustix::net::UCred,
     pub(crate) active_interfaces: &'static ActiveInterfaces,
     pub(crate) options: &'static crate::setup::WaydaptOptions,
 }
@@ -89,6 +92,10 @@ pub(crate) struct WaydaptSessionInitInfo {
 impl SessionInitInfo for WaydaptSessionInitInfo {
     fn ucred(&self) -> rustix::net::UCred {
         self.ucred
+    }
+
+    fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
+        self.active_interfaces
     }
 }
 
@@ -99,7 +106,6 @@ pub(crate) fn client_session(
     options: &'static crate::setup::WaydaptOptions, active_interfaces: &'static ActiveInterfaces,
     session_handlers: &VecDeque<SessionInitHandler>, client_stream: UnixStream,
 ) {
-    use crate::event_loop::EventLoop;
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
 
@@ -120,11 +126,7 @@ pub(crate) fn client_session(
 
     session_handlers.iter().for_each(|h| h(&init_info));
 
-    let mut input_handler = WaydaptInputHandler::new(&init_info);
+    let mut session = Session::new(&init_info, [client_stream, server_stream]);
 
-    let mut session = Session::new(options, [client_stream, server_stream]);
-
-    session.event_loop(&mut input_handler).unwrap();
+    crate::event_loop::event_loop(&mut session).unwrap();
 }
-
-// Probably the WaydaptInputHandler should carry the object id maps.

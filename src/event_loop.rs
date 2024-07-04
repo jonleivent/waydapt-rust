@@ -1,70 +1,46 @@
 #![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use crate::input_handler::InputHandler;
+use crate::crate_traits::EventHandler;
 use epoll::{CreateFlags, Event, EventData, EventFlags, EventVec};
 use rustix::event::epoll;
 use std::io::Result as IoResult;
-use std::os::fd::BorrowedFd;
 
-pub(crate) trait EventLoop {
-    fn fds(&self) -> impl Iterator<Item = BorrowedFd<'_>>;
-    fn handle_input<A: InputHandler>(&mut self, handler: &mut A, fd_index: usize) -> IoResult<()>;
-    fn handle_output(&mut self, fd_index: usize) -> IoResult<()>;
+// TBD: how important is having a messenger arg if it only gets passed into handle_input?
 
-    fn handle_error(&mut self, _fd_index: usize, flags: EventFlags) -> IoResult<()> {
-        use std::io::{Error, ErrorKind};
-        // TBD - maybe improve error messages for some sets of flags
-        Err(Error::new(
-            ErrorKind::ConnectionAborted,
-            format!("event flags: {:?}", flags.iter_names().collect::<Vec<_>>()),
-        ))
+pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()> {
+    let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
+    let fds = event_handler.fds_to_monitor();
+    // If we edge-trigger output (and we have to), and we combine input and output events,
+    // then we have to edge-trigger input.
+    let flags = EventFlags::IN | EventFlags::OUT | EventFlags::ET;
+    let mut count = 0;
+    for fd in fds {
+        let data = EventData::new_u64(count);
+        epoll::add(&epoll_fd, fd, data, flags)?;
+        count += 1;
     }
-
-    // The rest of these shouldn't be overridden.  Should we move them out of the trait?
-
-    fn handle<A: InputHandler>(
-        &mut self, handler: &mut A, fd_index: usize, flags: EventFlags,
-    ) -> IoResult<()> {
-        // If we do input and output on the same fds, which should we do first if both
-        // types of events come in together?  Probably output, as that happens fastest and
-        // doesn't have to wait on handler execution.
-        if flags.contains(EventFlags::OUT) {
-            self.handle_output(fd_index)?;
-        }
-        if flags.contains(EventFlags::IN) {
-            self.handle_input(handler, fd_index)?;
-        }
-        if !flags.difference(EventFlags::IN | EventFlags::OUT).is_empty() {
-            self.handle_error(fd_index, flags)?;
-        }
-        Ok(())
-    }
-
-    fn event_loop<A: InputHandler>(&mut self, handler: &mut A) -> IoResult<()> {
-        let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
-        let fds = self.fds();
-        // If we edge-trigger output (and we have to), and we combine input and output events,
-        // then we have to edge-trigger input.
-        let flags = EventFlags::IN | EventFlags::OUT | EventFlags::ET;
-        let mut count = 0;
-        for fd in fds {
-            let data = EventData::new_u64(count);
-            epoll::add(&epoll_fd, fd, data, flags)?;
-            count += 1;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let mut events = EventVec::with_capacity(count as usize); // would longer help?
-        loop {
-            epoll::wait(&epoll_fd, &mut events, 0)?;
-            // should never occur with 0 timeout:
-            assert!(!events.is_empty(), "Got 0 events from epoll::wait");
-            for Event { flags, data } in &events {
-                #[allow(clippy::cast_possible_truncation)]
-                let i = data.u64() as usize;
-                self.handle(handler, i, flags)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let mut events = EventVec::with_capacity(count as usize); // would longer help?
+    loop {
+        epoll::wait(&epoll_fd, &mut events, 0)?;
+        // should never occur with 0 timeout:
+        assert!(!events.is_empty(), "Got 0 events from epoll::wait");
+        for Event { flags, data } in &events {
+            #[allow(clippy::cast_possible_truncation)]
+            let i = data.u64() as usize;
+            // Since we do input and output on the same fds, we should first do output, as that happens
+            // fastest and doesn't have to wait on handler execution.
+            if flags.contains(EventFlags::OUT) {
+                event_handler.handle_output(i)?;
             }
-            events.clear(); // may not be needed
+            if flags.contains(EventFlags::IN) {
+                event_handler.handle_input(i)?;
+            }
+            if !flags.difference(EventFlags::IN | EventFlags::OUT).is_empty() {
+                event_handler.handle_error(i, flags)?;
+            }
         }
+        events.clear(); // may not be needed
     }
 }

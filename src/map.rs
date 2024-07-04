@@ -16,6 +16,8 @@ pub(crate) struct WaylandObjectMap<const IS_SERVER_SIDE: bool> {
     vect: Vec<ObjectEntry>,
 }
 
+// TBD: switch to using the Peer enum instead of a bool generic param.
+
 impl<const IS_SERVER_SIDE: bool> WaylandObjectMap<IS_SERVER_SIDE> {
     pub(crate) fn new() -> Self {
         Self { vect: Vec::new() }
@@ -56,6 +58,7 @@ impl<const IS_SERVER_SIDE: bool> WaylandObjectMap<IS_SERVER_SIDE> {
     }
 
     pub(crate) fn delete(&mut self, id: u32) {
+        // This must do nothing (don't panic!) if the id is not currently an object.
         let id = Self::normalize_id(id);
         let Some(e) = self.vect.get_mut(id) else { return };
         let ObjectEntry::Live(interface) = e else { return };
