@@ -2,12 +2,13 @@
 #![forbid(unsafe_code)]
 
 use crate::buffers::{InBuffer, OutBuffer};
-use crate::crate_traits::EventHandler;
+use crate::crate_traits::{EventHandler, Messenger};
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
 use crate::input_handler::WaydaptInputHandler;
 use crate::postparse::ActiveInterfaces;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
+use std::fmt::{Debug, Error, Formatter};
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -22,7 +23,7 @@ pub(crate) struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
-    pub(crate) fn new(init_info: &WaydaptSessionInitInfo, streams: [UnixStream; 2]) -> Self {
+    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo, streams: [UnixStream; 2]) -> Self {
         let mut s = Self {
             in_buffers: Default::default(),
             out_buffers: streams.map(IOStream::new).map(OutBuffer::new),
@@ -32,6 +33,10 @@ impl<'a> Session<'a> {
             .iter_mut()
             .for_each(|b| b.flush_every_send = init_info.options.flush_every_send);
         s
+    }
+
+    fn receive(&mut self, index: usize) -> IoResult<usize> {
+        self.in_buffers[index].receive(self.out_buffers[index].get_stream_mut())
     }
 }
 
@@ -44,29 +49,24 @@ impl<'a> EventHandler for Session<'a> {
         // By trying receive repeatedly until there's nothing left, we can use edge triggered IN
         // events, which may give higher performance:
         // https://thelinuxcode.com/epoll-7-c-function/
-        let mut receive_count = 0u32;
-        while self.in_buffers[index].receive(self.out_buffers[index].get_stream_mut())? > 0 {
-            receive_count += 1;
+        let (source_side, dest_side) = (index, 1 - index);
+        let mut total_msg_count = 0u32;
+        while self.receive(source_side)? > 0 {
             // We expect that at least one whole msg is received.  But we can handle things if
             // that's not the case.
             let mut msg_count = 0u32;
-            while let Some((msg, fds)) = self.in_buffers[index].try_pop() {
+            while let Some((msg, fds)) = self.in_buffers[source_side].try_pop() {
                 msg_count += 1;
-
                 // We need to pass index into handle so it knows whether the msg is a request or event.
-                self.messenger.handle(index, msg, fds, &mut self.out_buffers)?;
+                self.messenger.handle(index, msg, fds, &mut self.out_buffers[dest_side])?;
             }
             debug_assert!(msg_count > 0);
+            total_msg_count += msg_count;
         }
-        if receive_count > 0 {
-            // If we received anything, we probably generated output.  Usually that will happen
-            // on the opposite outbuf (1-index), but in the future when waydapt can originate
-            // its own messages, it could be either or both.
-            for b in &mut self.out_buffers {
-                // Force flush because we don't know when we will be back here, so waiting to
-                // flush any part might starve the receiver.
-                b.flush(/*force:*/ true)?;
-            }
+        if total_msg_count > 0 {
+            // Force flush because we don't know when we will be back here, so waiting to
+            // flush any part might starve the receiver.
+            self.out_buffers[dest_side].flush(true)?;
         }
         Ok(())
     }
@@ -87,6 +87,12 @@ pub(crate) struct WaydaptSessionInitInfo {
     pub(crate) ucred: rustix::net::UCred,
     pub(crate) active_interfaces: &'static ActiveInterfaces,
     pub(crate) options: &'static crate::setup::WaydaptOptions,
+}
+
+impl Debug for WaydaptSessionInitInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        f.write_str("WaydaptSessionInitInfo")
+    }
 }
 
 impl SessionInitInfo for WaydaptSessionInitInfo {

@@ -51,6 +51,8 @@ pub(crate) fn active_interfaces(
 }
 
 impl<'a> ActiveInterfacesA<'a> {
+    #![allow(clippy::must_use_candidate)]
+    #![allow(clippy::missing_panics_doc)]
     pub fn maybe_get_interface(&self, name: &str) -> Option<&'a Interface<'a>> {
         self.map.get(name).copied()
     }

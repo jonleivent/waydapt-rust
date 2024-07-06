@@ -1,13 +1,14 @@
 #![warn(clippy::pedantic)]
-//#![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
 
-use crate::basics::{get_msg_length, init_array, MAX_BYTES_OUT, MAX_FDS_OUT};
-use crate::crate_traits::{FdInput, InStream, MessageSender, OutStream};
+use crate::basics::{init_array, MAX_BYTES_OUT, MAX_FDS_OUT};
+use crate::crate_traits::{InStream, MessageSender, OutStream};
+use crate::header::{get_msg_length, MessageHeader};
 use arrayvec::ArrayVec;
 use std::collections::{LinkedList, VecDeque};
 
@@ -30,8 +31,8 @@ impl InBuffer {
         Self { data: init_array(0), front: 0, back: 0, fds: VecDeque::with_capacity(MAX_FDS_OUT) }
     }
 
-    // pop a single message from the buffer, based on the length in its header
-    pub(crate) fn try_pop(&mut self) -> Option<(&[u8], &mut impl FdInput)> {
+    // pop a single message from the buffer, based on the length in its header, if it is all there
+    pub(crate) fn try_pop(&mut self) -> Option<(&[u8], &mut VecDeque<OwnedFd>)> {
         let available = &self.data[self.front..self.back];
         let msg_len = get_msg_length(available)?;
         let msg = available.get(0..msg_len)?;
@@ -96,6 +97,7 @@ pub(crate) struct OutBuffer<S: OutStream> {
 }
 
 fn initial_chunks() -> Chunks {
+    #![allow(clippy::default_trait_access)]
     // Chunks with a single empty Chunk
     let mut new: Chunks = Default::default();
     new.push_back(Default::default());
@@ -105,8 +107,8 @@ fn initial_chunks() -> Chunks {
 const LIMIT_SENDS_TO_MAX_BYTES_OUT: bool = false;
 
 impl<S: OutStream> OutBuffer<S> {
-    #![allow(clippy::default_trait_access)]
     pub(crate) fn new(stream: S) -> Self {
+        #![allow(clippy::default_trait_access)]
         Self {
             chunks: initial_chunks(),
             free_chunks: Default::default(),
@@ -130,12 +132,15 @@ impl<S: OutStream> OutBuffer<S> {
         } else {
             self.free_chunks.split_off(self.free_chunks.len() - 1)
         };
-        assert!(new_end.front().unwrap().is_empty());
-        if LIMIT_SENDS_TO_MAX_BYTES_OUT && self.end().len() > MAX_BYTES_OUT {
-            let old_end = self.end_mut();
-            let overflow = &old_end[MAX_BYTES_OUT..];
-            new_end.front_mut().unwrap().extend(overflow.iter().copied());
-            old_end.truncate(MAX_BYTES_OUT);
+        let new_end_chunk = new_end.front_mut().expect(MUST_HAVE1);
+        assert!(new_end_chunk.is_empty());
+
+        // In some cases (MessageSender::send), we don't know until after we've put a message in the
+        // end chunk whether it extends past MAX_BYTES_OUT.  Check now, but only if we care about
+        // LIMIT_SENDS_TO_MAX_BYTES_OUT:
+        let old_end = self.end_mut();
+        if LIMIT_SENDS_TO_MAX_BYTES_OUT && old_end.len() > MAX_BYTES_OUT {
+            new_end_chunk.extend(old_end.drain(MAX_BYTES_OUT..));
         }
         self.chunks.append(&mut new_end);
     }
@@ -211,15 +216,8 @@ impl<S: OutStream> OutBuffer<S> {
         }
         Ok(amount_flushed)
     }
-}
 
-impl<S: OutStream> MessageSender for OutBuffer<S> {
-    fn send(
-        &mut self, fds: impl Iterator<Item = OwnedFd>, msgfun: impl FnOnce(&mut [u8]) -> usize,
-    ) -> IoResult<usize> {
-        // for each msg, push fds first, then push the msg.  This is because we want any fds to be
-        // associated with the earliest possible data chunk to help prevent fd starvation of the
-        // receiver.
+    fn add_fds(&mut self, fds: impl IntoIterator<Item = OwnedFd>) -> IoResult<()> {
         self.fds.extend(fds);
         // Prevent the possibility of having fds in the OutBuffer but no msg data, which can
         // cause starvation of the receiver.  This can happen whenever there are more fds than
@@ -231,23 +229,46 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
                 debug_assert!(!self.too_many_fds());
             }
         }
-        // Is there enough space in the end chunk for a max-sized message?  If not, start a new chunk:
+        Ok(())
+    }
+}
+
+impl<S: OutStream> MessageSender for OutBuffer<S> {
+    // Allow a closure (msgfun) to marshal the message into this OutBuffer using an ExtendChunk for
+    // each arg of th message, and returning the MessageSender for us to fix up (fix the size field)
+    // and marshal.
+    fn send(
+        &mut self, fds: impl IntoIterator<Item = OwnedFd>,
+        msgfun: impl FnOnce(ExtendChunk) -> MessageHeader,
+    ) -> IoResult<usize> {
+        // for each msg, push fds first, then push the msg.  This is because we want any fds to be
+        // associated with the earliest possible data chunk to help prevent fd starvation of the
+        // receiver.
+        self.add_fds(fds)?;
+
+        // Is there enough space in the end chunk for a max-sized message?  If not, start a new
+        // chunk.  In this version of send (unlike send_raw), we don't try to completely fill chunks
+        // before moving on to a new one, because we don't know the message length before we allow
+        // msgfun to write the message.  We could have made ExtendChunk more elaborate and test each
+        // case for splitting, but that would have added complexity and possibly also made
+        // ExtendChunk slower.  Instead, we rely on the fact that each chunk has 2 * MAX_BYTES_OUT
+        // capacity, while each message can have max MAX_BYTES_OUT length.  Also, if
+        // LIMIT_SENDS_TO_MAX_BYTES_OUT is set, start_next_chunk will do splitting for us (at the
+        // cost of an additional copy of the split off end).
         if self.end().remaining_capacity() < MAX_BYTES_OUT {
             self.start_next_chunk();
         };
-        // Unsafely give msgfun a mut slice large enough for the max message:
+
         let end_chunk = self.end_mut();
         let orig_len = end_chunk.len();
-        // Why this unsafe block isn't that unsafe: the elements of a chunk are u8s, set_len doesn't
-        // allow us to set the length beyond the capacity of the ArrayVec, and we will reset the
-        // length below to its proper value (assuming msgfun returned the proper value, which we
-        // check with a debug_assert):
-        unsafe { end_chunk.set_len(orig_len + MAX_BYTES_OUT) };
-        let len = msgfun(&mut end_chunk[orig_len..]);
-        debug_assert!(len >= 8 && len <= MAX_BYTES_OUT);
-        debug_assert_eq!(len, get_msg_length(end_chunk).unwrap());
-        // .. then set the length acurately:
-        end_chunk.truncate(orig_len + len);
+        end_chunk.extend(vec![0u8; 8]); // make room for header, which we will write below
+        let mut header = msgfun(ExtendChunk(end_chunk));
+        let new_len = end_chunk.len();
+        let len = new_len - orig_len;
+        debug_assert!((8..=MAX_BYTES_OUT).contains(&len) && (len % 4 == 0));
+        // fix the header.size field to the now known length and write the header:
+        header.size = u16::try_from(len).expect("Message is too long");
+        end_chunk[orig_len..orig_len + 8].copy_from_slice(&header.as_bytes());
 
         // This flush is not forced (unless flush_every_send is true) because somewhere up the
         // call chain there is someone responsible for forcing a flush after all pending message
@@ -255,6 +276,36 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
         // and is not necessary.  It's benefit is that it may raise the throughput by allowing
         // more parallelism between sender and receiver.  It may also limit the number of chunks
         // needed in this OutBuffer.
+        self.flush(self.flush_every_send)
+    }
+
+    // Allow a closure (msgfun) to copy a message in its raw form (including header) from the
+    // InBuffer to the OutBuffer.
+    fn send_raw(
+        &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u8],
+    ) -> IoResult<usize> {
+        debug_assert_eq!(get_msg_length(raw_msg).unwrap(), raw_msg.len());
+
+        self.add_fds(fds)?;
+
+        let msg_len = raw_msg.len();
+        let end_chunk = self.end_mut();
+        let room = if LIMIT_SENDS_TO_MAX_BYTES_OUT {
+            MAX_BYTES_OUT - end_chunk.len()
+        } else {
+            end_chunk.remaining_capacity()
+        };
+        if room >= msg_len {
+            // msg fits in end chunk
+            end_chunk.extend(raw_msg.iter().copied());
+        } else {
+            // split across 2 chunks
+            let (first_part, last_part) = raw_msg.split_at(room);
+            end_chunk.extend(first_part.iter().copied());
+            self.start_next_chunk();
+            self.end_mut().extend(last_part.iter().copied());
+        }
+
         self.flush(self.flush_every_send)
     }
 }
@@ -268,3 +319,34 @@ const COMPACT_SCHEME: CompactScheme = CompactScheme::Eager;
 
 const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
 const ALLOWED_EXCESS_CHUNKS: usize = 8;
+
+pub(crate) struct ExtendChunk<'a>(pub(self) &'a mut Chunk);
+
+impl<'a> ExtendChunk<'a> {
+    #![allow(clippy::inline_always)]
+    #[inline(always)]
+    pub(crate) fn add_u32(&mut self, data: u32) {
+        self.0.extend(data.to_ne_bytes());
+    }
+
+    #[inline(always)]
+    pub(crate) fn add_i32(&mut self, data: i32) {
+        self.0.extend(data.to_ne_bytes());
+    }
+
+    #[inline(always)]
+    pub(crate) fn add_array(&mut self, data: &[u8], zero_term: bool) {
+        let len = data.len();
+        let lenz = len + usize::from(zero_term);
+        let lenz4 = crate::basics::round4(lenz);
+        let pad = lenz4 - len;
+        {
+            #![allow(clippy::cast_possible_truncation)]
+            self.0.extend((lenz as u32).to_ne_bytes());
+        }
+        self.0.extend(data.iter().copied());
+        if pad > 0 {
+            self.0.extend(vec![0; pad]);
+        }
+    }
+}

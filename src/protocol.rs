@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
+#![allow(clippy::missing_panics_doc)]
 
 use crate::for_handlers::MessageHandler;
 use std::collections::VecDeque;

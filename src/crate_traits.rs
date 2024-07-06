@@ -2,6 +2,38 @@ use rustix::event::epoll::EventFlags;
 use std::io::Result as IoResult;
 use std::os::fd::{BorrowedFd, OwnedFd};
 
+use crate::buffers::ExtendChunk;
+use crate::header::MessageHeader;
+use crate::map::WL_SERVER_ID_START;
+
+pub(crate) trait Peer {
+    const IS_SERVER: bool;
+
+    fn normalize_id(id: u32) -> usize;
+}
+
+pub(crate) struct ClientPeer;
+
+impl Peer for ClientPeer {
+    const IS_SERVER: bool = false;
+
+    fn normalize_id(id: u32) -> usize {
+        assert!(id < WL_SERVER_ID_START, "Wrong side id");
+        id as usize
+    }
+}
+
+pub(crate) struct ServerPeer;
+
+impl Peer for ServerPeer {
+    const IS_SERVER: bool = true;
+
+    fn normalize_id(id: u32) -> usize {
+        assert!(id >= WL_SERVER_ID_START, "Wrong side id");
+        (id - WL_SERVER_ID_START) as usize
+    }
+}
+
 pub(crate) trait InStream {
     fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
 }
@@ -16,7 +48,12 @@ pub(crate) trait FdInput {
 
 pub(crate) trait MessageSender {
     fn send(
-        &mut self, fds: impl Iterator<Item = OwnedFd>, msgfun: impl FnOnce(&mut [u8]) -> usize,
+        &mut self, fds: impl IntoIterator<Item = OwnedFd>,
+        msgfun: impl FnOnce(ExtendChunk) -> MessageHeader,
+    ) -> IoResult<usize>;
+
+    fn send_raw(
+        &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u8],
     ) -> IoResult<usize>;
 }
 
@@ -25,7 +62,7 @@ pub(crate) trait Messenger {
     type MS: MessageSender;
 
     fn handle(
-        &mut self, from: usize, in_msg: &[u8], in_fds: &mut Self::FI, outs: &mut [Self::MS; 2],
+        &mut self, from: usize, in_msg: &[u8], in_fds: &mut Self::FI, out: &mut Self::MS,
     ) -> IoResult<()>;
 }
 

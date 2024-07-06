@@ -35,8 +35,6 @@ pub enum MessageHandlerResult {
     Drop,
 }
 
-// TBD - it may be the case that we need a &mut dyn SessionInfo in order to add ids in the case of
-// wl_registry::bind, unless we build that in.
 pub type MessageHandler = fn(&mut dyn MessageInfo, &mut dyn SessionInfo) -> MessageHandlerResult;
 
 pub type SessionInitHandler = fn(&dyn SessionInitInfo);
@@ -63,28 +61,3 @@ pub trait AddHandler {
 }
 
 pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler);
-
-// We want a MessageHandler to be able to:
-// exit with Ok (drops message) or an Err (causes session shutdown)
-// call the next handler
-// send message
-//
-// both call next handler and send message are within scope of current handler, so that lifetimes of
-// updates to message work
-//
-// Note that because the handler interfaces to both the demarsh message and the session through
-// traits, that determines where a method to send has to be - it has to be on the message because
-// that method has to be able to see into the demarsh message beyond just what is exposed by the
-// trait, but as long as it has access to the OutChannel, that's all it needs from the session.
-//
-// If we don't care about possibly originating other messages, we could move the OutChannels to the
-// DemarshalledMessage, so it has all it needs to send itself.  But that doesn't help with calling
-// the next handler, which needs the SessionInfo as well.  So keep the OutChannels on the SessionInfo.
-
-// Another possibility is that the demarsh message struct is the interface that the handler sees,
-// not a trait.  We can control what it can use by pub control.  That would meaning moving the
-// InputHander impl for WaydaptInputHandler into message.rs, so it can use the nonpub methods, like
-// new.  But the problem with this is that the demarsh message has to be mut, and we don't want the
-// handler to be able to modify anything except the individual args.  It should not for instance be
-// able to push or pop args from the arg vec.  But we could make ALL of those fields private and
-// just provide a few public methods.

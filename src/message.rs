@@ -4,9 +4,10 @@
 
 use arrayvec::ArrayVec;
 
-use crate::basics::{bytes2i32, bytes2u32, load_slice, round4, MAX_ARGS, MAX_BYTES_OUT};
+use crate::basics::{bytes2i32, bytes2u32, round4, MAX_ARGS};
 use crate::crate_traits::{FdInput, MessageSender};
 use crate::for_handlers::MessageInfo;
+use crate::header::MessageHeader;
 use crate::input_handler::IdMap;
 use crate::map::WL_SERVER_ID_START;
 use crate::postparse::ActiveInterfaces;
@@ -15,30 +16,6 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
-
-pub(crate) struct MessageHeader {
-    pub(crate) object_id: u32,
-    pub(crate) opcode: usize,
-    pub(crate) size: usize,
-}
-
-impl MessageHeader {
-    pub(crate) fn new(header: &[u8]) -> Self {
-        let object_id = bytes2u32(&header[0..4]);
-        let word_2 = bytes2u32(&header[4..8]);
-        let opcode = (word_2 & 0xffff) as usize;
-        let size = (word_2 >> 16) as usize;
-        assert!(size <= MAX_BYTES_OUT);
-        Self { object_id, opcode, size }
-    }
-
-    fn as_bytes(&self) -> [u8; 8] {
-        let word1 = self.object_id.to_ne_bytes();
-        #[allow(clippy::cast_possible_truncation)]
-        let word2 = (((self.size << 16) | self.opcode) as u32).to_ne_bytes();
-        [word1, word2].concat().try_into().unwrap()
-    }
-}
 
 #[derive(Debug)]
 pub enum ArgData<'a> {
@@ -58,13 +35,9 @@ pub(crate) struct DemarshalledMessage<'a> {
     args: ArrayVec<ArgData<'a>, MAX_ARGS>,
     source: &'a [u8],
     maybe_modified: bool,
+    maybe_arg_type_changed: bool,
     fds: ArrayVec<OwnedFd, MAX_ARGS>,
 }
-
-// Maybe, instead of storing the OwnedFds in the Fd args, we have a separate vector for the fds as a
-// field in DemarshalledMessage and store an index into that in the Fd arg.  That way we can push
-// the fds out before any part of the message, assuming we push message parts directly to the out
-// buffer.  Or we can store BorrowedFds in the Fd Args.
 
 type RMessage = &'static Message<'static>;
 
@@ -192,17 +165,19 @@ impl<'a> DemarshalledMessage<'a> {
         assert!(data.is_empty());
     }
 
+    #[cold]
     pub(crate) fn new(
         header: MessageHeader, msg_decl: RMessage, data: &'a [u8], fds: &'_ mut impl FdInput,
         id_map: &'_ mut IdMap, active_interfaces: &'static ActiveInterfaces,
     ) -> Self {
-        assert_eq!(header.size, data.len());
+        assert_eq!(header.size as usize, data.len());
         let mut s = Self {
             msg_decl,
             header,
             args: ArrayVec::new(),
             source: data,
             maybe_modified: false,
+            maybe_arg_type_changed: false,
             fds: ArrayVec::new(),
         };
         s.init(id_map, &data[8..], fds, active_interfaces);
@@ -217,81 +192,57 @@ impl<'a> DemarshalledMessage<'a> {
         );
     }
 
-    fn recalculate_size(&mut self) {
-        let mut size = 8; // for the header
-        for arg in &self.args {
-            size += match arg {
-                ArgData::Fd { .. } => 0,
-                ArgData::Array(a) => 4 + round4(a.len()),
-                ArgData::String(s) => 4 + round4(s.len() + 1), // +1 for 0 term
-                _ => 4,
-            }
-        }
-        assert!(size <= MAX_BYTES_OUT);
-        self.header.size = size;
-    }
-
-    fn push_u32(x: u32, buf: &mut [u8]) -> usize {
-        buf[..4].copy_from_slice(&x.to_ne_bytes());
-        4
-    }
-
-    fn push_i32(x: i32, buf: &mut [u8]) -> usize {
-        buf[..4].copy_from_slice(&x.to_ne_bytes());
-        4
-    }
-
-    fn push_array(data: &[u8], zero_term: bool, buf: &mut [u8]) -> usize {
-        let len = data.len();
-        let lenz = len + usize::from(zero_term);
-        let lenz4 = round4(lenz);
-        let (len_field, out) = buf.split_at_mut(4);
-        #[allow(clippy::cast_possible_truncation)]
-        // does the length pushed for strings include the 0-term?  Yes:
-        len_field.copy_from_slice(&(lenz as u32).to_ne_bytes());
-        let (out, pad) = out[..lenz4].split_at_mut(len);
-        out.copy_from_slice(data);
-        pad.fill(0);
-        lenz4 + 4
-    }
-
-    fn output_modified(&mut self, sender: &mut impl MessageSender) -> IoResult<usize> {
+    fn output_modified_check_types(self, sender: &mut impl MessageSender) -> IoResult<usize> {
         self.test_arg_invariant();
-        sender.send(self.fds.drain(..), |out| {
-            let (hbuf, mut buf) = out.split_at_mut(8);
-            let mut message_size = 8; // for the header
-            for arg_typ in self.args.drain(..).zip(self.msg_decl.args.iter().map(|a| a.typ)) {
-                let arg_size = match arg_typ {
-                    (ArgData::Int(i), Type::Int) => Self::push_i32(i, buf),
-                    (ArgData::Uint(u), Type::Uint) => Self::push_u32(u, buf),
-                    (ArgData::Fixed(f), Type::Fixed) => Self::push_i32(f, buf),
-                    (ArgData::String(s), Type::String) => Self::push_array(&s, true, buf),
-                    (ArgData::Object(i), Type::Object) => Self::push_u32(i, buf),
-                    (ArgData::NewId { id, .. }, Type::NewId) => Self::push_u32(id, buf),
-                    (ArgData::Array(a), Type::Array) => Self::push_array(&a, false, buf),
-                    (ArgData::Fd { .. }, Type::Fd) => 0, // TBD: check index?
+        sender.send(self.fds, |mut ext| {
+            for arg_typ in self.args.into_iter().zip(self.msg_decl.args.iter().map(|a| a.typ)) {
+                match arg_typ {
+                    (ArgData::Int(i), Type::Int) => ext.add_i32(i),
+                    (ArgData::Uint(u), Type::Uint) => ext.add_u32(u),
+                    (ArgData::Fixed(f), Type::Fixed) => ext.add_i32(f),
+                    (ArgData::String(s), Type::String) => ext.add_array(&s, true),
+                    (ArgData::Object(i), Type::Object) => ext.add_u32(i),
+                    (ArgData::NewId { id, .. }, Type::NewId) => ext.add_u32(id),
+                    (ArgData::Array(a), Type::Array) => ext.add_array(&a, false),
+                    (ArgData::Fd { .. }, Type::Fd) => {} // TBD: check index?
                     (arg, typ) => panic!("{arg:?} vs. {typ:?} mismatch"),
                 };
-                message_size += arg_size;
-                buf = &mut buf[arg_size..];
             }
-            self.header.size = message_size;
-            hbuf.copy_from_slice(&self.header.as_bytes());
-            message_size
+            self.header
         })
     }
 
-    pub(crate) fn output(&mut self, sender: &mut impl MessageSender) -> IoResult<usize> {
-        if self.maybe_modified {
+    fn output_modified(self, sender: &mut impl MessageSender) -> IoResult<usize> {
+        sender.send(self.fds, |mut ext| {
+            for arg in self.args {
+                match arg {
+                    ArgData::Int(i) => ext.add_i32(i),
+                    ArgData::Uint(u) => ext.add_u32(u),
+                    ArgData::Fixed(f) => ext.add_i32(f),
+                    ArgData::String(s) => ext.add_array(&s, true),
+                    ArgData::Object(i) => ext.add_u32(i),
+                    ArgData::NewId { id, .. } => ext.add_u32(id),
+                    ArgData::Array(a) => ext.add_array(&a, false),
+                    ArgData::Fd { .. } => {} // TBD: check index?
+                };
+            }
+            self.header
+        })
+    }
+
+    pub(crate) fn output(self, sender: &mut impl MessageSender) -> IoResult<usize> {
+        if self.maybe_arg_type_changed {
+            self.output_modified_check_types(sender)
+        } else if self.maybe_modified {
             self.output_modified(sender)
         } else {
             self.output_unmodified(sender)
         }
     }
 
-    pub(crate) fn output_unmodified(&mut self, sender: &mut impl MessageSender) -> IoResult<usize> {
+    pub(crate) fn output_unmodified(self, sender: &mut impl MessageSender) -> IoResult<usize> {
         debug_assert!(!self.maybe_modified);
-        sender.send(self.fds.drain(..), |out| load_slice(out, self.source))
+        sender.send_raw(self.fds, self.source)
     }
 }
 
@@ -306,11 +257,13 @@ impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
 
     fn get_arg_mut(&mut self, index: usize) -> &mut ArgData<'a> {
         self.maybe_modified = true;
+        self.maybe_arg_type_changed = true;
         &mut self.args[index]
     }
 
     fn get_cell_args(&mut self) -> &[Cell<ArgData<'a>>] {
         self.maybe_modified = true;
+        self.maybe_arg_type_changed = true;
         Cell::from_mut(self.args.as_mut_slice()).as_slice_of_cells()
     }
 

@@ -2,15 +2,15 @@
 #![allow(dead_code)]
 #![forbid(unsafe_code)]
 
-use crate::basics::load_slice;
 use crate::buffers::OutBuffer;
-use crate::crate_traits::{FdInput, MessageSender, Messenger};
+use crate::crate_traits::{ClientPeer, FdInput, MessageSender, Messenger, ServerPeer};
 use crate::for_handlers::{
     AddHandler, ArgData, MessageHandlerResult, MessageInfo, RInterface, SessionInfo,
     SessionInitInfo,
 };
+use crate::header::MessageHeader;
 use crate::map::{WaylandObjectMap, WL_SERVER_ID_START};
-use crate::message::{DemarshalledMessage, MessageHeader};
+use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
 use crate::session::WaydaptSessionInitInfo;
 use crate::streams::IOStream;
@@ -31,9 +31,10 @@ impl FdInput for VecDeque<OwnedFd> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug)]
 pub(crate) struct IdMap {
-    pub(crate) client_id_map: WaylandObjectMap<false>,
-    pub(crate) server_id_map: WaylandObjectMap<true>,
+    pub(crate) client_id_map: WaylandObjectMap<ClientPeer>,
+    pub(crate) server_id_map: WaylandObjectMap<ServerPeer>,
 }
 
 impl IdMap {
@@ -68,6 +69,7 @@ impl IdMap {
 }
 
 // This should hold all marshal/demarshal relevant info, including object id maps.  Maybe rename it?
+#[derive(Debug)]
 pub(crate) struct WaydaptInputHandler<'a> {
     id_map: IdMap,
     init_info: &'a WaydaptSessionInitInfo,
@@ -116,18 +118,13 @@ impl<'a> Messenger for WaydaptInputHandler<'a> {
     type MS = OutBuffer<IOStream>;
 
     fn handle(
-        &mut self,
-        index: usize,
-        in_msg: &[u8],
-        in_fds: &mut Self::FI,
-        outs: &mut [Self::MS; 2], // to: [client,server]
+        &mut self, index: usize, in_msg: &[u8], in_fds: &mut Self::FI, out: &mut Self::MS,
     ) -> IoResult<()> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;
         let header = MessageHeader::new(in_msg);
         let interface = self.id_map.lookup(header.object_id);
-        let msg_decl = interface.get_message(from_server, header.opcode);
-        let out = &mut outs[1 - index]; // output opposite side from input
+        let msg_decl = interface.get_message(from_server, header.opcode as usize);
         let active_interfaces = self.init_info.active_interfaces;
         if let Some(handlers) = msg_decl.handlers.get() {
             let mut demarsh = DemarshalledMessage::new(
@@ -149,8 +146,11 @@ impl<'a> Messenger for WaydaptInputHandler<'a> {
             }
             demarsh.output(out)?;
         } else if msg_decl.new_id_interface.get().is_some() {
-            // Demarshal just to process new_id arg:
-            let mut demarsh = DemarshalledMessage::new(
+            // Demarshal just to process new_id arg.  We could optimize this to only do the work
+            // needed to eventually call id_map.add for the new_id, but in most cases, a new_id
+            // bearing message will have very few other arguments (usually none), so the wasted work
+            // is minimal.  Best to keep the same code path:
+            let demarsh = DemarshalledMessage::new(
                 header,
                 msg_decl,
                 in_msg,
@@ -160,9 +160,11 @@ impl<'a> Messenger for WaydaptInputHandler<'a> {
             );
             demarsh.output_unmodified(out)?;
         } else {
-            // No demarshal needed - this path allows transfering data directly from the input
-            // buffer to the output buffer with no intermediate copies.
-            out.send(in_fds.drain(..), |buf| load_slice(buf, in_msg))?;
+            // No demarshalling needed - this path allows transfering data directly from the input
+            // buffer to the output buffer with no intermediate copies, and should be the choice for
+            // most of the message traffic
+            let num_fds = msg_decl.num_fds as usize;
+            out.send_raw(in_fds.drain(0..num_fds), in_msg)?;
         }
         Ok(())
     }
@@ -278,9 +280,9 @@ mod safeclip {
     fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and add PREFIX to the front of it:
         for i in 0..msg.get_num_args() {
-            if let ArgData::String(s) = msg.get_arg_mut(i) {
+            if let ArgData::String(s) = msg.get_arg(i) {
                 let prefix = PREFIX.get().unwrap().as_slice();
-                *s = [prefix, s].concat().into();
+                msg.set_arg(i, ArgData::String([prefix, s].concat().into()));
                 return MessageHandlerResult::Next;
             }
         }
