@@ -4,7 +4,7 @@
 
 use arrayvec::ArrayVec;
 
-use crate::basics::{round4, MAX_ARGS};
+use crate::basics::{round4, to_u8_slice, MAX_ARGS};
 use crate::crate_traits::{FdInput, MessageSender};
 use crate::for_handlers::MessageInfo;
 use crate::header::MessageHeader;
@@ -66,8 +66,7 @@ impl<'a> DemarshalledMessage<'a> {
         let strlen = data[0] as usize;
         let end = round4(strlen) + 4;
         let nwords = end / 4;
-        let (a, s, z) = unsafe { data[1..nwords].align_to::<u8>() };
-        debug_assert!(a.is_empty() && z.is_empty());
+        let s = unsafe { to_u8_slice(&data[1..nwords]) };
         // Check that the first 0 in s is at strlen:
         let c = CStr::from_bytes_with_nul(&s[..strlen]).unwrap();
         self.args.push(ArgData::String(Cow::from(c)));
@@ -89,8 +88,7 @@ impl<'a> DemarshalledMessage<'a> {
         let len = data[0] as usize;
         let end = round4(len) + 4;
         let nwords = end / 4;
-        let (a, s, z) = unsafe { data[1..nwords].align_to::<u8>() };
-        debug_assert!(a.is_empty() && z.is_empty());
+        let s = unsafe { to_u8_slice(&data[1..nwords]) };
         self.args.push(ArgData::Array(Cow::from(&s[..len])));
         nwords
     }

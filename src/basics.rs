@@ -1,3 +1,5 @@
+use crate::crate_traits::IsNumericType;
+
 pub(crate) const MAX_FDS_OUT: usize = 28;
 
 pub(crate) const MAX_BYTES_OUT: usize = 4096;
@@ -11,20 +13,36 @@ pub(crate) const fn round4(x: usize) -> usize {
 }
 
 #[inline(always)]
-pub(crate) fn bytes2u32(bytes: &[u8]) -> u32 {
-    u32::from_ne_bytes(bytes[0..4].try_into().unwrap())
-}
-
-#[inline(always)]
-pub(crate) fn bytes2i32(bytes: &[u8]) -> i32 {
-    i32::from_ne_bytes(bytes[0..4].try_into().unwrap())
-}
-
-#[inline(always)]
 pub(crate) fn init_array<T: Copy, const N: usize>(init_element: T) -> [T; N] {
     [init_element; N]
 }
 
-// What has to be done to use Peer intead of index for buffers/streams, and also in maps?
-//
-// Rust only allows bool and str as generic constants.  We could make Peer a trait with an associated constant INDEX (0 for client, 1 for server), with two types implementing it.
+#[inline(always)]
+pub(crate) unsafe fn to_u8_slice_mut<T: IsNumericType>(s: &mut [T]) -> &mut [u8] {
+    let (start, s2, end) = unsafe { s.align_to_mut::<u8>() };
+    debug_assert!(start.is_empty() && end.is_empty());
+    s2
+}
+
+#[inline(always)]
+pub(crate) unsafe fn to_u8_slice<T: IsNumericType>(s: &[T]) -> &[u8] {
+    let (start, s2, end) = unsafe { s.align_to::<u8>() };
+    debug_assert!(start.is_empty() && end.is_empty());
+    s2
+}
+
+impl IsNumericType for u8 {}
+impl IsNumericType for u16 {}
+impl IsNumericType for u32 {}
+impl IsNumericType for u64 {}
+impl IsNumericType for u128 {}
+impl IsNumericType for usize {}
+
+impl IsNumericType for i8 {}
+impl IsNumericType for i16 {}
+impl IsNumericType for i32 {}
+impl IsNumericType for i64 {}
+impl IsNumericType for i128 {}
+impl IsNumericType for isize {}
+
+impl IsNumericType for bool {}

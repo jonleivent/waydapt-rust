@@ -3,8 +3,13 @@
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
-use crate::basics::{init_array, MAX_FDS_OUT};
-use crate::crate_traits::{InStream, OutStream};
+use crate::basics::{init_array, to_u8_slice, to_u8_slice_mut, MAX_FDS_OUT};
+use crate::crate_traits::{InStream, IsNumericType, OutStream};
+use rustix::io::{retry_on_intr, Errno, IoSlice, IoSliceMut};
+use rustix::net::{recvmsg, RecvFlags};
+use rustix::net::{send, sendmsg, SendFlags};
+use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage};
+use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage};
 use std::io::Result as IoResult;
 use std::mem::size_of;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
@@ -39,20 +44,18 @@ fn cloexec_fd(fd: Fd) {
 }
 
 impl InStream for IOStream {
-    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize> {
-        use rustix::io::{retry_on_intr, Errno, IoSliceMut};
-        use rustix::net::{recvmsg, RecvFlags};
-        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage};
-
-        let (start_pad, buf, end_pad) = unsafe { buf.align_to_mut::<u8>() };
-        debug_assert!(start_pad.is_empty() && end_pad.is_empty());
+    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>
+    where
+        T: IsNumericType,
+    {
+        let byte_buf = unsafe { to_u8_slice_mut(buf) };
 
         let flags = RecvFlags::DONTWAIT;
         #[cfg(not(target_os = "macos"))]
         let flags = flags | RecvFlags::CMSG_CLOEXEC;
 
         let mut cmsg_buffer = RecvAncillaryBuffer::new(&mut self.cmsg_space);
-        let mut iov = [IoSliceMut::new(buf)];
+        let mut iov = [IoSliceMut::new(byte_buf)];
         let recv = || recvmsg(&self.stream, &mut iov, &mut cmsg_buffer, flags);
         let bytes = match retry_on_intr(recv) {
             Ok(b) => b.bytes,
@@ -79,13 +82,11 @@ impl InStream for IOStream {
 }
 
 impl OutStream for IOStream {
-    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
-        use rustix::io::{retry_on_intr, Errno, IoSlice};
-        use rustix::net::{send, sendmsg, SendFlags};
-        use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage};
-
-        let (start_pad, bdata, end_pad) = unsafe { data.align_to::<u8>() };
-        debug_assert!(start_pad.is_empty() && end_pad.is_empty());
+    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>
+    where
+        T: IsNumericType,
+    {
+        let byte_data = unsafe { to_u8_slice(data) };
 
         let flags = SendFlags::DONTWAIT;
         #[cfg(not(target_os = "macos"))]
@@ -93,10 +94,10 @@ impl OutStream for IOStream {
 
         let outfd = self.stream.as_fd();
         let result = if fds.is_empty() {
-            retry_on_intr(|| send(outfd, bdata, flags))
+            retry_on_intr(|| send(outfd, byte_data, flags))
         } else {
             debug_assert!(fds.len() <= MAX_FDS_OUT);
-            let iov = [IoSlice::new(bdata)];
+            let iov = [IoSlice::new(byte_data)];
             let mut cmsg_buffer = SendAncillaryBuffer::new(&mut self.cmsg_space);
             let pushed = cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
             debug_assert!(pushed);
@@ -104,7 +105,7 @@ impl OutStream for IOStream {
         };
         match result {
             Ok(bytes) => {
-                assert_eq!(bytes, bdata.len());
+                assert_eq!(bytes, byte_data.len());
                 let per = size_of::<T>();
                 Ok(bytes / per)
             }

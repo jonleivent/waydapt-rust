@@ -35,11 +35,15 @@ impl Peer for ServerPeer {
 }
 
 pub(crate) trait InStream {
-    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
+    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>
+    where
+        T: IsNumericType;
 }
 
 pub(crate) trait OutStream {
-    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
+    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>
+    where
+        T: IsNumericType;
 }
 
 pub(crate) trait FdInput {
@@ -82,3 +86,5 @@ pub(crate) trait EventHandler {
         ))
     }
 }
+
+pub(crate) trait IsNumericType {}

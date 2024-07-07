@@ -3,14 +3,13 @@
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
-use std::io::Result as IoResult;
-use std::os::unix::io::{AsFd, OwnedFd};
-
-use crate::basics::{init_array, MAX_FDS_OUT, MAX_WORDS_OUT};
+use crate::basics::{init_array, to_u8_slice_mut, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::{InStream, MessageSender, OutStream};
 use crate::header::{get_msg_length, MessageHeader};
 use arrayvec::ArrayVec;
 use std::collections::{LinkedList, VecDeque};
+use std::io::Result as IoResult;
+use std::os::unix::io::{AsFd, OwnedFd};
 
 #[derive(Debug)]
 pub(crate) struct InBuffer {
@@ -351,11 +350,10 @@ impl<'a> ExtendChunk<'a> {
         let len = data.len();
         self.add_u32(len as u32);
         let nwords = (len + 3) / 4;
-        let (start, buf, rem) = unsafe {
+        let buf = unsafe {
             let words = self.add_mut_slice(nwords);
-            words.align_to_mut::<u8>()
+            to_u8_slice_mut(words)
         };
-        debug_assert!(start.is_empty() && rem.is_empty());
         buf[..len].copy_from_slice(data);
     }
 }
