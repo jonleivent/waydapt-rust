@@ -6,6 +6,7 @@
 use crate::basics::{init_array, MAX_FDS_OUT};
 use crate::crate_traits::{InStream, OutStream};
 use std::io::Result as IoResult;
+use std::mem::size_of;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
@@ -71,7 +72,9 @@ impl InStream for IOStream {
 
             fds.extend(received_fds);
         }
-        Ok(bytes)
+        let per = size_of::<T>();
+        assert_eq!(bytes % per, 0);
+        Ok(bytes / per)
     }
 }
 
@@ -81,7 +84,7 @@ impl OutStream for IOStream {
         use rustix::net::{send, sendmsg, SendFlags};
         use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage};
 
-        let (start_pad, data, end_pad) = unsafe { data.align_to::<u8>() };
+        let (start_pad, bdata, end_pad) = unsafe { data.align_to::<u8>() };
         debug_assert!(start_pad.is_empty() && end_pad.is_empty());
 
         let flags = SendFlags::DONTWAIT;
@@ -90,17 +93,21 @@ impl OutStream for IOStream {
 
         let outfd = self.stream.as_fd();
         let result = if fds.is_empty() {
-            retry_on_intr(|| send(outfd, data, flags))
+            retry_on_intr(|| send(outfd, bdata, flags))
         } else {
             debug_assert!(fds.len() <= MAX_FDS_OUT);
-            let iov = [IoSlice::new(data)];
+            let iov = [IoSlice::new(bdata)];
             let mut cmsg_buffer = SendAncillaryBuffer::new(&mut self.cmsg_space);
             let pushed = cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
             debug_assert!(pushed);
             retry_on_intr(|| sendmsg(outfd, &iov, &mut cmsg_buffer, flags))
         };
         match result {
-            Ok(b) => Ok(b),
+            Ok(bytes) => {
+                assert_eq!(bytes, bdata.len());
+                let per = size_of::<T>();
+                Ok(bytes / per)
+            }
             Err(e) if e == Errno::WOULDBLOCK => Ok(0),
             Err(e) if e == Errno::AGAIN => Ok(0),
             Err(e) => Err(e.into()),
