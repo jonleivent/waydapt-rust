@@ -4,7 +4,7 @@
 
 use arrayvec::ArrayVec;
 
-use crate::basics::{bytes2i32, bytes2u32, round4, MAX_ARGS};
+use crate::basics::{round4, MAX_ARGS};
 use crate::crate_traits::{FdInput, MessageSender};
 use crate::for_handlers::MessageInfo;
 use crate::header::MessageHeader;
@@ -33,7 +33,7 @@ pub(crate) struct DemarshalledMessage<'a> {
     msg_decl: RMessage,
     header: MessageHeader,
     args: ArrayVec<ArgData<'a>, MAX_ARGS>,
-    source: &'a [u8],
+    source: &'a [u32],
     maybe_modified: bool,
     maybe_arg_type_changed: bool,
     fds: ArrayVec<OwnedFd, MAX_ARGS>,
@@ -42,41 +42,62 @@ pub(crate) struct DemarshalledMessage<'a> {
 type RMessage = &'static Message<'static>;
 
 impl<'a> DemarshalledMessage<'a> {
-    fn add_int(&mut self, data: &[u8]) -> usize {
-        self.args.push(ArgData::Int(bytes2i32(data)));
-        4
+    fn add_int(&mut self, data: &[u32]) -> usize {
+        #[allow(clippy::cast_possible_wrap)]
+        self.args.push(ArgData::Int(data[0] as i32));
+        1
     }
-    fn add_uint(&mut self, data: &[u8]) -> usize {
-        self.args.push(ArgData::Uint(bytes2u32(data)));
-        4
+    fn add_uint(&mut self, data: &[u32]) -> usize {
+        self.args.push(ArgData::Uint(data[0]));
+        1
     }
-    fn add_fixed(&mut self, data: &[u8]) -> usize {
-        self.args.push(ArgData::Fixed(bytes2i32(data)));
-        4
+    fn add_fixed(&mut self, data: &[u32]) -> usize {
+        #[allow(clippy::cast_possible_wrap)]
+        self.args.push(ArgData::Fixed(data[0] as i32));
+        1
     }
-    fn add_object(&mut self, data: &[u8]) -> usize {
-        self.args.push(ArgData::Object(bytes2u32(data)));
-        4
+    fn add_object(&mut self, data: &[u32]) -> usize {
+        self.args.push(ArgData::Object(data[0]));
+        1
     }
-    fn add_string_internal(&mut self, data: &'a [u8]) -> (usize, &'a [u8]) {
-        let strlen = bytes2u32(&data[0..4]) as usize;
-        let len = round4(strlen + 1) + 4; // +1 for 0-term
-        let s = &data[4..len];
+    fn add_string_internal(&mut self, data: &'a [u32]) -> (usize, &'a [u8]) {
+        // in Wayland wire protocol, the strlen includes the 0-term, unlike in C
+        let strlen = data[0] as usize;
+        let end = round4(strlen) + 4;
+        let nwords = end / 4;
+        let (a, s, z) = unsafe { data[1..nwords].align_to::<u8>() };
+        debug_assert!(a.is_empty() && z.is_empty());
         // Check that the first 0 in s is at strlen:
-        let zero_term =
+        let zero_term_index =
             s.iter().enumerate().find_map(|(c, i)| if c == 0 { Some(*i as usize) } else { None });
-        assert_eq!(zero_term, Some(strlen));
-        self.args.push(ArgData::String(Cow::from(s)));
-        (len, s)
+        debug_assert_eq!(zero_term_index, Some(strlen));
+        if strlen == 0 {
+            self.args.push(ArgData::String(Cow::from(&[])));
+        } else {
+            self.args.push(ArgData::String(Cow::from(&s[..strlen - 1]))); // -1 for 0-term
+        }
+        (nwords, s)
     }
-    fn add_string(&mut self, data: &'a [u8]) -> usize {
+
+    // Question - can a 1-length string appear in the Wayland wire protocol?  It would have to be
+    // just the 0-term, in which case it would be considered an empty string, but it isn't length 0.
+    // It it can appear, how do we cover that case?  Because we can't distinguish between the two in
+    // Rust.  What this means is that if a 1 length string was sent, we'd forward it as a 0-length
+    // string.  That might be bad.  Maybe the solution is to use CString + &CStr as the Cow element
+    // in ArgData::String.
+
+    fn add_string(&mut self, data: &'a [u32]) -> usize {
         self.add_string_internal(data).0
     }
 
-    fn add_array(&mut self, data: &'a [u8]) -> usize {
-        let len = round4(bytes2u32(&data[0..4]) as usize) + 4;
-        self.args.push(ArgData::Array(Cow::from(&data[4..len])));
-        len
+    fn add_array(&mut self, data: &'a [u32]) -> usize {
+        let len = data[0] as usize;
+        let end = round4(len) + 4;
+        let nwords = end / 4;
+        let (a, s, z) = unsafe { data[1..nwords].align_to::<u8>() };
+        debug_assert!(a.is_empty() && z.is_empty());
+        self.args.push(ArgData::Array(Cow::from(&s[..len])));
+        nwords
     }
     fn add_fd(&mut self, fd: OwnedFd) -> usize {
         self.args.push(ArgData::Fd { index: self.fds.len() });
@@ -84,13 +105,13 @@ impl<'a> DemarshalledMessage<'a> {
         0
     }
     fn add_new_id(
-        &mut self, data: &'a [u8], id_map: &'_ mut IdMap,
+        &mut self, data: &'a [u32], id_map: &'_ mut IdMap,
         active_interfaces: &'static ActiveInterfaces,
     ) -> usize {
         let Some(interface) = self.msg_decl.get_new_id_interface() else {
             return self.add_wl_registry_bind_new_id(data, id_map, active_interfaces);
         };
-        let id = bytes2u32(&data[0..4]);
+        let id = data[0];
         // check if this is a wayland-idfix delete_id request:
         if id >= WL_SERVER_ID_START && self.msg_decl.is_wl_display_sync() {
             // TBD should we do the delete here?: Note that the C waydapt doesn't.  So we won't either.
@@ -110,11 +131,11 @@ impl<'a> DemarshalledMessage<'a> {
             id_map.add(id, interface);
             self.args.push(ArgData::NewId { id, interface });
         }
-        4
+        1
     }
 
     fn add_wl_registry_bind_new_id(
-        &mut self, data: &'a [u8], id_map: &'_ mut IdMap,
+        &mut self, data: &'a [u32], id_map: &'_ mut IdMap,
         active_interfaces: &'static ActiveInterfaces,
     ) -> usize {
         // Right now, only wl_registry::bind can have such an arg, but we could potentially handle
@@ -129,24 +150,21 @@ impl<'a> DemarshalledMessage<'a> {
         let data = &data[len..];
         let name = std::str::from_utf8(s).unwrap();
         let interface = active_interfaces.get_global(name);
-        let version = bytes2u32(data);
-        let len = len + 4;
-        self.args.push(ArgData::Uint(version));
-        let data = &data[4..];
-        let id = bytes2u32(data);
-        let len = len + 4;
+        let version = data[0];
+        let id = data[1];
         let limited_version = *interface.version().unwrap(); // if none, then not active
         assert!(
             version <= limited_version,
             "Client attempted to bind version {version} > {limited_version} on {interface}"
         );
         id_map.add(id, interface);
+        self.args.push(ArgData::Uint(version));
         self.args.push(ArgData::NewId { id, interface });
-        len
+        len + 2
     }
 
     fn init(
-        &mut self, id_map: &'_ mut IdMap, mut data: &'a [u8], fds: &'_ mut impl FdInput,
+        &mut self, id_map: &'_ mut IdMap, mut data: &'a [u32], fds: &'_ mut impl FdInput,
         active_interfaces: &'static ActiveInterfaces,
     ) {
         for arg in self.msg_decl.get_args() {
@@ -167,7 +185,7 @@ impl<'a> DemarshalledMessage<'a> {
 
     #[cold]
     pub(crate) fn new(
-        header: MessageHeader, msg_decl: RMessage, data: &'a [u8], fds: &'_ mut impl FdInput,
+        header: MessageHeader, msg_decl: RMessage, data: &'a [u32], fds: &'_ mut impl FdInput,
         id_map: &'_ mut IdMap, active_interfaces: &'static ActiveInterfaces,
     ) -> Self {
         assert_eq!(header.size as usize, data.len());
@@ -180,7 +198,7 @@ impl<'a> DemarshalledMessage<'a> {
             maybe_arg_type_changed: false,
             fds: ArrayVec::new(),
         };
-        s.init(id_map, &data[8..], fds, active_interfaces);
+        s.init(id_map, &data[2..], fds, active_interfaces);
         s
     }
 

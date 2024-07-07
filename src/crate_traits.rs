@@ -35,11 +35,11 @@ impl Peer for ServerPeer {
 }
 
 pub(crate) trait InStream {
-    fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
+    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>;
 }
 
 pub(crate) trait OutStream {
-    fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
+    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>;
 }
 
 pub(crate) trait FdInput {
@@ -53,7 +53,7 @@ pub(crate) trait MessageSender {
     ) -> IoResult<usize>;
 
     fn send_raw(
-        &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u8],
+        &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u32],
     ) -> IoResult<usize>;
 }
 
@@ -62,7 +62,7 @@ pub(crate) trait Messenger {
     type MS: MessageSender;
 
     fn handle(
-        &mut self, from: usize, in_msg: &[u8], in_fds: &mut Self::FI, out: &mut Self::MS,
+        &mut self, from: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MS,
     ) -> IoResult<()>;
 }
 

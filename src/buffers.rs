@@ -1,12 +1,12 @@
 #![warn(clippy::pedantic)]
-#![forbid(unsafe_code)]
+//#![forbid(unsafe_code)]
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
 
-use crate::basics::{init_array, MAX_BYTES_OUT, MAX_FDS_OUT};
+use crate::basics::{init_array, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::{InStream, MessageSender, OutStream};
 use crate::header::{get_msg_length, MessageHeader};
 use arrayvec::ArrayVec;
@@ -14,7 +14,7 @@ use std::collections::{LinkedList, VecDeque};
 
 #[derive(Debug)]
 pub(crate) struct InBuffer {
-    data: [u8; MAX_BYTES_OUT * 2],
+    data: [u32; MAX_WORDS_OUT * 2],
     front: usize,
     back: usize,
     fds: VecDeque<OwnedFd>,
@@ -32,7 +32,7 @@ impl InBuffer {
     }
 
     // pop a single message from the buffer, based on the length in its header, if it is all there
-    pub(crate) fn try_pop(&mut self) -> Option<(&[u8], &mut VecDeque<OwnedFd>)> {
+    pub(crate) fn try_pop(&mut self) -> Option<(&[u32], &mut VecDeque<OwnedFd>)> {
         let available = &self.data[self.front..self.back];
         let msg_len = get_msg_length(available)?;
         let msg = available.get(0..msg_len)?;
@@ -45,7 +45,7 @@ impl InBuffer {
         S: InStream,
     {
         self.compact();
-        debug_assert!(self.back <= MAX_BYTES_OUT);
+        debug_assert!(self.back <= MAX_WORDS_OUT);
         // if we have more than MAX_BYTES_OUT available storage, should we allow receive to use
         // it?  That might cause problems with fds - if we receive too much, we might leave fds
         // in the kernel socket buffer that we need.  How would this happen?  Suppose that the
@@ -53,7 +53,7 @@ impl InBuffer {
         // have room for all MAX_BYTES_OUT + D data.  We will only take in MAX_FDS_OUT fds,
         // however, and if the first MAX_BYTES_OUT msgs use all MAX_FDS_OUT fds, then the last D
         // msgs will be starved of fds.  So we have to limit the message input to MAX_BYTES_OUT.
-        let buf = &mut self.data[self.back..(MAX_BYTES_OUT + self.back)];
+        let buf = &mut self.data[self.back..(MAX_WORDS_OUT + self.back)];
         let amount_read = stream.receive(buf, &mut self.fds)?;
         self.back += amount_read;
         Ok(amount_read)
@@ -61,12 +61,12 @@ impl InBuffer {
 
     fn compact(&mut self) {
         let len = self.back - self.front;
-        debug_assert!(len <= MAX_BYTES_OUT);
+        debug_assert!(len <= MAX_WORDS_OUT);
         // Compacting more often than absolutely necessary has a cost, but it may improve CPU
         // cache friendliness.
         let threshold = match COMPACT_SCHEME {
             CompactScheme::Eager => len,
-            CompactScheme::Lazy => MAX_BYTES_OUT + 1,
+            CompactScheme::Lazy => MAX_WORDS_OUT + 1,
         };
         if self.front >= threshold {
             // the total current payload fits below front, so move it there.  We can use the
@@ -80,9 +80,9 @@ impl InBuffer {
     }
 }
 
-const CHUNK_SIZE: usize = MAX_BYTES_OUT * 2;
+const CHUNK_SIZE: usize = MAX_WORDS_OUT * 2;
 
-type Chunk = ArrayVec<u8, CHUNK_SIZE>;
+type Chunk = ArrayVec<u32, CHUNK_SIZE>;
 // Either of the following works:
 type Chunks = LinkedList<Chunk>;
 //type Chunks = VecDeque<Box<Chunk>>;
@@ -139,8 +139,8 @@ impl<S: OutStream> OutBuffer<S> {
         // end chunk whether it extends past MAX_BYTES_OUT.  Check now, but only if we care about
         // LIMIT_SENDS_TO_MAX_BYTES_OUT:
         let old_end = self.end_mut();
-        if LIMIT_SENDS_TO_MAX_BYTES_OUT && old_end.len() > MAX_BYTES_OUT {
-            new_end_chunk.extend(old_end.drain(MAX_BYTES_OUT..));
+        if LIMIT_SENDS_TO_MAX_BYTES_OUT && old_end.len() > MAX_WORDS_OUT {
+            new_end_chunk.extend(old_end.drain(MAX_WORDS_OUT..));
         }
         self.chunks.append(&mut new_end);
     }
@@ -255,20 +255,20 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
         // capacity, while each message can have max MAX_BYTES_OUT length.  Also, if
         // LIMIT_SENDS_TO_MAX_BYTES_OUT is set, start_next_chunk will do splitting for us (at the
         // cost of an additional copy of the split off end).
-        if self.end().remaining_capacity() < MAX_BYTES_OUT {
+        if self.end().remaining_capacity() < MAX_WORDS_OUT {
             self.start_next_chunk();
         };
 
         let end_chunk = self.end_mut();
         let orig_len = end_chunk.len();
-        end_chunk.extend(vec![0u8; 8]); // make room for header, which we will write below
+        end_chunk.extend(vec![0u32; 2]); // make room for header, which we will write below
         let mut header = msgfun(ExtendChunk(end_chunk));
         let new_len = end_chunk.len();
         let len = new_len - orig_len;
-        debug_assert!((8..=MAX_BYTES_OUT).contains(&len) && (len % 4 == 0));
+        debug_assert!((2..=MAX_WORDS_OUT).contains(&len));
         // fix the header.size field to the now known length and write the header:
         header.size = u16::try_from(len).expect("Message is too long");
-        end_chunk[orig_len..orig_len + 8].copy_from_slice(&header.as_bytes());
+        end_chunk[orig_len..orig_len + 2].copy_from_slice(&header.as_words());
 
         // This flush is not forced (unless flush_every_send is true) because somewhere up the
         // call chain there is someone responsible for forcing a flush after all pending message
@@ -282,7 +282,7 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
     // Allow a closure (msgfun) to copy a message in its raw form (including header) from the
     // InBuffer to the OutBuffer.
     fn send_raw(
-        &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u8],
+        &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u32],
     ) -> IoResult<usize> {
         debug_assert_eq!(get_msg_length(raw_msg).unwrap(), raw_msg.len());
 
@@ -291,7 +291,7 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
         let msg_len = raw_msg.len();
         let end_chunk = self.end_mut();
         let room = if LIMIT_SENDS_TO_MAX_BYTES_OUT {
-            MAX_BYTES_OUT - end_chunk.len()
+            MAX_WORDS_OUT - end_chunk.len()
         } else {
             end_chunk.remaining_capacity()
         };
@@ -326,27 +326,46 @@ impl<'a> ExtendChunk<'a> {
     #![allow(clippy::inline_always)]
     #[inline(always)]
     pub(crate) fn add_u32(&mut self, data: u32) {
-        self.0.extend(data.to_ne_bytes());
+        self.0.push(data);
     }
 
     #[inline(always)]
     pub(crate) fn add_i32(&mut self, data: i32) {
-        self.0.extend(data.to_ne_bytes());
+        #[allow(clippy::cast_sign_loss)]
+        self.0.push(data as u32);
+    }
+
+    #[inline(always)]
+    unsafe fn add_mut_slice(&mut self, nwords: usize) -> &mut [u32] {
+        let orig_len = self.0.len();
+        let new_len = orig_len + nwords;
+        unsafe {
+            self.0.set_len(new_len);
+        }
+        &mut self.0[orig_len..new_len]
     }
 
     #[inline(always)]
     pub(crate) fn add_array(&mut self, data: &[u8], zero_term: bool) {
+        #![allow(clippy::cast_possible_truncation)]
         let len = data.len();
+        if len == 0 {
+            self.add_u32(0);
+            return;
+        }
         let lenz = len + usize::from(zero_term);
-        let lenz4 = crate::basics::round4(lenz);
-        let pad = lenz4 - len;
-        {
-            #![allow(clippy::cast_possible_truncation)]
-            self.0.extend((lenz as u32).to_ne_bytes());
-        }
-        self.0.extend(data.iter().copied());
-        if pad > 0 {
-            self.0.extend(vec![0; pad]);
-        }
+        // in the Wayland wire protocol, the length header of a zero-terminated string includes the
+        // final 0, unlike C
+        self.add_u32(lenz as u32);
+        let nwords = (lenz + 3) / 4;
+        let (start, buf, rem) = unsafe {
+            let words = self.add_mut_slice(nwords);
+            if zero_term {
+                *words.last_mut().unwrap() = 0;
+            }
+            words.align_to_mut::<u8>()
+        };
+        debug_assert!(start.is_empty() && rem.is_empty());
+        buf[..len].copy_from_slice(data);
     }
 }

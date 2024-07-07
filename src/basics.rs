@@ -1,6 +1,7 @@
 pub(crate) const MAX_FDS_OUT: usize = 28;
 
 pub(crate) const MAX_BYTES_OUT: usize = 4096;
+pub(crate) const MAX_WORDS_OUT: usize = MAX_BYTES_OUT / 4;
 
 pub(crate) const MAX_ARGS: usize = 20; // WL_CLOSURE_MAX_ARGS in wayland
 

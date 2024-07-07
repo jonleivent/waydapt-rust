@@ -118,7 +118,7 @@ impl<'a> Messenger for WaydaptInputHandler<'a> {
     type MS = OutBuffer<IOStream>;
 
     fn handle(
-        &mut self, index: usize, in_msg: &[u8], in_fds: &mut Self::FI, out: &mut Self::MS,
+        &mut self, index: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MS,
     ) -> IoResult<()> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;

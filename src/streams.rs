@@ -1,5 +1,5 @@
 #![warn(clippy::pedantic)]
-#![forbid(unsafe_code)]
+//#![forbid(unsafe_code)]
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
@@ -38,10 +38,13 @@ fn cloexec_fd(fd: Fd) {
 }
 
 impl InStream for IOStream {
-    fn receive(&mut self, buf: &mut [u8], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize> {
+    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize> {
         use rustix::io::{retry_on_intr, Errno, IoSliceMut};
         use rustix::net::{recvmsg, RecvFlags};
         use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage};
+
+        let (start_pad, buf, end_pad) = unsafe { buf.align_to_mut::<u8>() };
+        debug_assert!(start_pad.is_empty() && end_pad.is_empty());
 
         let flags = RecvFlags::DONTWAIT;
         #[cfg(not(target_os = "macos"))]
@@ -73,10 +76,13 @@ impl InStream for IOStream {
 }
 
 impl OutStream for IOStream {
-    fn send(&mut self, data: &[u8], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
+    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
         use rustix::io::{retry_on_intr, Errno, IoSlice};
         use rustix::net::{send, sendmsg, SendFlags};
         use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage};
+
+        let (start_pad, data, end_pad) = unsafe { data.align_to::<u8>() };
+        debug_assert!(start_pad.is_empty() && end_pad.is_empty());
 
         let flags = SendFlags::DONTWAIT;
         #[cfg(not(target_os = "macos"))]
