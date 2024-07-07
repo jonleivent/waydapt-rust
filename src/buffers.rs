@@ -346,23 +346,13 @@ impl<'a> ExtendChunk<'a> {
     }
 
     #[inline(always)]
-    pub(crate) fn add_array(&mut self, data: &[u8], zero_term: bool) {
+    pub(crate) fn add_array(&mut self, data: &[u8]) {
         #![allow(clippy::cast_possible_truncation)]
         let len = data.len();
-        if len == 0 {
-            self.add_u32(0);
-            return;
-        }
-        let lenz = len + usize::from(zero_term);
-        // in the Wayland wire protocol, the length header of a zero-terminated string includes the
-        // final 0, unlike C
-        self.add_u32(lenz as u32);
-        let nwords = (lenz + 3) / 4;
+        self.add_u32(len as u32);
+        let nwords = (len + 3) / 4;
         let (start, buf, rem) = unsafe {
             let words = self.add_mut_slice(nwords);
-            if zero_term {
-                *words.last_mut().unwrap() = 0;
-            }
             words.align_to_mut::<u8>()
         };
         debug_assert!(start.is_empty() && rem.is_empty());

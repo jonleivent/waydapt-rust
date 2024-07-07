@@ -14,6 +14,7 @@ use crate::postparse::ActiveInterfaces;
 use crate::protocol::{Interface, Message, Type};
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::ffi::CStr;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
 
@@ -22,7 +23,7 @@ pub enum ArgData<'a> {
     Int(i32),
     Uint(u32),
     Fixed(i32),
-    String(Cow<'a, [u8]>),
+    String(Cow<'a, CStr>),
     Object(u32),
     NewId { id: u32, interface: &'static Interface<'static> },
     Array(Cow<'a, [u8]>),
@@ -60,7 +61,7 @@ impl<'a> DemarshalledMessage<'a> {
         self.args.push(ArgData::Object(data[0]));
         1
     }
-    fn add_string_internal(&mut self, data: &'a [u32]) -> (usize, &'a [u8]) {
+    fn add_string_internal(&mut self, data: &'a [u32]) -> (usize, &'a CStr) {
         // in Wayland wire protocol, the strlen includes the 0-term, unlike in C
         let strlen = data[0] as usize;
         let end = round4(strlen) + 4;
@@ -68,15 +69,9 @@ impl<'a> DemarshalledMessage<'a> {
         let (a, s, z) = unsafe { data[1..nwords].align_to::<u8>() };
         debug_assert!(a.is_empty() && z.is_empty());
         // Check that the first 0 in s is at strlen:
-        let zero_term_index =
-            s.iter().enumerate().find_map(|(c, i)| if c == 0 { Some(*i as usize) } else { None });
-        debug_assert_eq!(zero_term_index, Some(strlen));
-        if strlen == 0 {
-            self.args.push(ArgData::String(Cow::from(&[])));
-        } else {
-            self.args.push(ArgData::String(Cow::from(&s[..strlen - 1]))); // -1 for 0-term
-        }
-        (nwords, s)
+        let c = CStr::from_bytes_with_nul(&s[..strlen]).unwrap();
+        self.args.push(ArgData::String(Cow::from(c)));
+        (nwords, c)
     }
 
     // Question - can a 1-length string appear in the Wayland wire protocol?  It would have to be
@@ -148,7 +143,7 @@ impl<'a> DemarshalledMessage<'a> {
         // The arg is really 3: string, u32, u32, which are interface-name, version, new_id.
         let (len, s) = self.add_string_internal(data);
         let data = &data[len..];
-        let name = std::str::from_utf8(s).unwrap();
+        let name = s.to_str().unwrap();
         let interface = active_interfaces.get_global(name);
         let version = data[0];
         let id = data[1];
@@ -218,10 +213,10 @@ impl<'a> DemarshalledMessage<'a> {
                     (ArgData::Int(i), Type::Int) => ext.add_i32(i),
                     (ArgData::Uint(u), Type::Uint) => ext.add_u32(u),
                     (ArgData::Fixed(f), Type::Fixed) => ext.add_i32(f),
-                    (ArgData::String(s), Type::String) => ext.add_array(&s, true),
+                    (ArgData::String(s), Type::String) => ext.add_array(s.to_bytes_with_nul()),
                     (ArgData::Object(i), Type::Object) => ext.add_u32(i),
                     (ArgData::NewId { id, .. }, Type::NewId) => ext.add_u32(id),
-                    (ArgData::Array(a), Type::Array) => ext.add_array(&a, false),
+                    (ArgData::Array(a), Type::Array) => ext.add_array(&a),
                     (ArgData::Fd { .. }, Type::Fd) => {} // TBD: check index?
                     (arg, typ) => panic!("{arg:?} vs. {typ:?} mismatch"),
                 };
@@ -237,10 +232,10 @@ impl<'a> DemarshalledMessage<'a> {
                     ArgData::Int(i) => ext.add_i32(i),
                     ArgData::Uint(u) => ext.add_u32(u),
                     ArgData::Fixed(f) => ext.add_i32(f),
-                    ArgData::String(s) => ext.add_array(&s, true),
+                    ArgData::String(s) => ext.add_array(s.to_bytes_with_nul()),
                     ArgData::Object(i) => ext.add_u32(i),
                     ArgData::NewId { id, .. } => ext.add_u32(id),
-                    ArgData::Array(a) => ext.add_array(&a, false),
+                    ArgData::Array(a) => ext.add_array(&a),
                     ArgData::Fd { .. } => {} // TBD: check index?
                 };
             }

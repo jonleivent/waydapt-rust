@@ -177,7 +177,7 @@ fn wl_registry_global_handler(
 ) -> MessageHandlerResult {
     // arg0 is the "name" of the global instance, really a uint
     let ArgData::String(interface_name) = msg.get_arg(1) else { panic!() };
-    let interface_name = std::str::from_utf8(interface_name).unwrap();
+    let interface_name = interface_name.to_str().unwrap();
     let ArgData::Uint(advertised_version) = msg.get_arg(2) else { panic!() };
     let active_interfaces = session_info.get_active_interfaces();
     let Some(global_interface) = active_interfaces.maybe_get_global(interface_name) else {
@@ -223,18 +223,21 @@ pub(crate) fn add_builtin_handlers(adder: &mut dyn AddHandler) {
 ////////////////////////////////////////////////////////////////////////////////
 
 mod safeclip {
+    use std::ffi::CString;
+
     use super::{
         AddHandler, ArgData, Cow, MessageHandlerResult, MessageInfo, OnceLock, SessionInfo,
     };
 
-    static PREFIX: OnceLock<Vec<u8>> = OnceLock::new();
+    static PREFIX: OnceLock<CString> = OnceLock::new();
 
     fn init_handler(args: &[String], adder: &mut dyn AddHandler) {
         // we expect exactly one arg, which is the prefix.  Unlike the C waydapt, the 0th arg is NOT
         // the dll name, it is our first arg.
         assert_eq!(args.len(), 1);
         let prefix = &args[0];
-        PREFIX.set(prefix.as_bytes().to_owned()).unwrap();
+        let cprefix = CString::new(prefix.clone()).unwrap();
+        PREFIX.set(cprefix).unwrap();
         let requests = [
             ("wl_shell_surface", "set_title"),
             ("xdg_toplevel", "set_title"),
@@ -281,8 +284,10 @@ mod safeclip {
         // find the first String arg and add PREFIX to the front of it:
         for i in 0..msg.get_num_args() {
             if let ArgData::String(s) = msg.get_arg(i) {
-                let prefix = PREFIX.get().unwrap().as_slice();
-                msg.set_arg(i, ArgData::String([prefix, s].concat().into()));
+                let prefix = PREFIX.get().unwrap();
+                let both = [prefix.to_bytes(), s.to_bytes()].concat();
+                let cstring = CString::new(both).unwrap();
+                msg.set_arg(i, ArgData::String(cstring.into()));
                 return MessageHandlerResult::Next;
             }
         }
@@ -296,19 +301,19 @@ mod safeclip {
 
     fn remove_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and remove PREFIX from the front of it:
-        let prefix = PREFIX.get().unwrap().as_slice();
+        let prefix = PREFIX.get().unwrap().to_bytes();
         let plen = prefix.len();
         for i in 0..msg.get_num_args() {
             match msg.get_arg_mut(i) {
                 // Almost all cases will be borrowed, which saves us a copy:
-                ArgData::String(Cow::Borrowed(s)) if prefixed(prefix, s) => {
+                ArgData::String(Cow::Borrowed(s)) if prefixed(prefix, s.to_bytes()) => {
                     *s = &s[plen..]; // O(1) move, no copy
                     return MessageHandlerResult::Next;
                 }
                 // Not worth optimizing this case - it would only happen if we have a previous handler
                 // modifying this same string arg:
-                ArgData::String(Cow::Owned(s)) if prefixed(prefix, s) => {
-                    s.drain(..plen); // O(N) copy
+                ArgData::String(Cow::Owned(s)) if prefixed(prefix, s.to_bytes()) => {
+                    *s = CString::new(&s.to_bytes()[plen..]).unwrap(); // O(N) copy
                     return MessageHandlerResult::Next;
                 }
                 ArgData::String(_) => return MessageHandlerResult::Drop,
