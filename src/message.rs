@@ -48,37 +48,34 @@ impl<'a> DemarshalledMessage<'a> {
         self.args.push(ArgData::Int(data[0] as i32));
         1
     }
+
     fn add_uint(&mut self, data: &[u32]) -> usize {
         self.args.push(ArgData::Uint(data[0]));
         1
     }
+
     fn add_fixed(&mut self, data: &[u32]) -> usize {
         #[allow(clippy::cast_possible_wrap)]
         self.args.push(ArgData::Fixed(data[0] as i32));
         1
     }
+
     fn add_object(&mut self, data: &[u32]) -> usize {
         self.args.push(ArgData::Object(data[0]));
         1
     }
+
     fn add_string_internal(&mut self, data: &'a [u32]) -> (usize, &'a CStr) {
         // in Wayland wire protocol, the strlen includes the 0-term, unlike in C
         let strlen = data[0] as usize;
         let end = round4(strlen) + 4;
         let nwords = end / 4;
-        let s = unsafe { to_u8_slice(&data[1..nwords]) };
+        let s = to_u8_slice(&data[1..nwords]);
         // Check that the first 0 in s is at strlen:
         let c = CStr::from_bytes_with_nul(&s[..strlen]).unwrap();
         self.args.push(ArgData::String(Cow::from(c)));
         (nwords, c)
     }
-
-    // Question - can a 1-length string appear in the Wayland wire protocol?  It would have to be
-    // just the 0-term, in which case it would be considered an empty string, but it isn't length 0.
-    // It it can appear, how do we cover that case?  Because we can't distinguish between the two in
-    // Rust.  What this means is that if a 1 length string was sent, we'd forward it as a 0-length
-    // string.  That might be bad.  Maybe the solution is to use CString + &CStr as the Cow element
-    // in ArgData::String.
 
     fn add_string(&mut self, data: &'a [u32]) -> usize {
         self.add_string_internal(data).0
@@ -88,15 +85,17 @@ impl<'a> DemarshalledMessage<'a> {
         let len = data[0] as usize;
         let end = round4(len) + 4;
         let nwords = end / 4;
-        let s = unsafe { to_u8_slice(&data[1..nwords]) };
+        let s = to_u8_slice(&data[1..nwords]);
         self.args.push(ArgData::Array(Cow::from(&s[..len])));
         nwords
     }
+
     fn add_fd(&mut self, fd: OwnedFd) -> usize {
         self.args.push(ArgData::Fd { index: self.fds.len() });
         self.fds.push(fd);
         0
     }
+
     fn add_new_id(
         &mut self, data: &'a [u32], id_map: &'_ mut IdMap,
         active_interfaces: &'static ActiveInterfaces,
@@ -134,17 +133,17 @@ impl<'a> DemarshalledMessage<'a> {
         // Right now, only wl_registry::bind can have such an arg, but we could potentially handle
         // others.
         assert!(self.msg_decl.is_wl_registry_bind());
-        // Marshalling through output_modified it will fail because there will be a mismatch between
+        // Marshalling through output_modified will fail because there will be a mismatch between
         // the msg_decl args and the args vector for this argument.  So it has to go through the
         // output_unmodified method.  Maybe fix this if needed?  TBD
 
         // The arg is really 3: string, u32, u32, which are interface-name, version, new_id.
         let (len, s) = self.add_string_internal(data);
-        let data = &data[len..];
+        let rest = &data[len..];
         let name = s.to_str().unwrap();
         let interface = active_interfaces.get_global(name);
-        let version = data[0];
-        let id = data[1];
+        let version = rest[0];
+        let id = rest[1];
         let limited_version = *interface.version().unwrap(); // if none, then not active
         assert!(
             version <= limited_version,

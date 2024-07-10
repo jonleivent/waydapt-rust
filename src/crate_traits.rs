@@ -35,15 +35,15 @@ impl Peer for ServerPeer {
 }
 
 pub(crate) trait InStream {
-    fn receive<T>(&mut self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>
+    fn receive<T>(&self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>
     where
-        T: IsNumericType;
+        T: AllBitValuesSafe;
 }
 
 pub(crate) trait OutStream {
-    fn send<T>(&mut self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>
+    fn send<T>(&self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>
     where
-        T: IsNumericType;
+        T: AllBitValuesSafe;
 }
 
 pub(crate) trait FdInput {
@@ -63,10 +63,10 @@ pub(crate) trait MessageSender {
 
 pub(crate) trait Messenger {
     type FI: FdInput;
-    type MS: MessageSender;
+    type MO: MessageSender;
 
     fn handle(
-        &mut self, from: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MS,
+        &mut self, from: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MO,
     ) -> IoResult<()>;
 }
 
@@ -87,4 +87,6 @@ pub(crate) trait EventHandler {
     }
 }
 
-pub(crate) trait IsNumericType {}
+// ImplAsBytes should only be implemented for types that are implemented as bytes without
+// translation, and without any possible unsafe bit values - such as the primitive numeric types
+pub(crate) unsafe trait AllBitValuesSafe {}

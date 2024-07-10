@@ -70,12 +70,12 @@ impl IdMap {
 
 // This should hold all marshal/demarshal relevant info, including object id maps.  Maybe rename it?
 #[derive(Debug)]
-pub(crate) struct WaydaptInputHandler<'a> {
+pub(crate) struct WaydaptMessageHandler<'a> {
     id_map: IdMap,
     init_info: &'a WaydaptSessionInitInfo,
 } // TBD
 
-impl<'a> WaydaptInputHandler<'a> {
+impl<'a> WaydaptMessageHandler<'a> {
     pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo) -> Self {
         let mut s = Self { id_map: IdMap::new(), init_info };
         // the client id map always has the wl_display interface at id 1:
@@ -113,12 +113,12 @@ impl<'a> SessionInfo for WaydaptSessionInfo<'a> {
     }
 }
 
-impl<'a> Messenger for WaydaptInputHandler<'a> {
+impl<'a> Messenger for WaydaptMessageHandler<'a> {
     type FI = VecDeque<OwnedFd>;
-    type MS = OutBuffer<IOStream>;
+    type MO = OutBuffer<IOStream>;
 
     fn handle(
-        &mut self, index: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MS,
+        &mut self, index: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MO,
     ) -> IoResult<()> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;

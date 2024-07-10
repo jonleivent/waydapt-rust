@@ -3,10 +3,11 @@
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
-use crate::basics::{init_array, to_u8_slice_mut, MAX_FDS_OUT, MAX_WORDS_OUT};
+use crate::basics::{to_u8_slice_mut, uninit_array, MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::{InStream, MessageSender, OutStream};
 use crate::header::{get_msg_length, MessageHeader};
 use arrayvec::ArrayVec;
+use rustix::fd::BorrowedFd;
 use std::collections::{LinkedList, VecDeque};
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
@@ -27,38 +28,52 @@ impl Default for InBuffer {
 
 impl InBuffer {
     pub(crate) fn new() -> Self {
-        Self { data: init_array(0), front: 0, back: 0, fds: VecDeque::with_capacity(MAX_FDS_OUT) }
+        Self { data: uninit_array(), front: 0, back: 0, fds: VecDeque::with_capacity(MAX_FDS_OUT) }
     }
 
     // pop a single message from the buffer, based on the length in its header, if it is all there
     pub(crate) fn try_pop(&mut self) -> Option<(&[u32], &mut VecDeque<OwnedFd>)> {
+        debug_assert!(self.back <= self.data.len() && self.front <= self.back);
         let available = &self.data[self.front..self.back];
+        // Determine the msg len from its header, if enough is there for a header:
         let msg_len = get_msg_length(available)?;
+        // Check if the whole message is available:
         let msg = available.get(0..msg_len)?;
+        // must be &mut self because of this:
         self.front += msg_len;
+        debug_assert!(self.front <= self.back);
+        // For borrow-checker reasons, we have to return the msg and a &mut ref to the fds VecDeque
+        // so that the caller retains the ability to get fds from that during the lifetime of the
+        // msg, which borrows from &mut self:
         Some((msg, &mut self.fds))
     }
 
-    pub(crate) fn receive<S>(&mut self, stream: &'_ mut S) -> IoResult<usize>
+    pub(crate) fn receive<S>(&mut self, stream: &'_ S) -> IoResult<usize>
     where
         S: InStream,
     {
         self.compact();
         debug_assert!(self.back <= MAX_WORDS_OUT);
-        // if we have more than MAX_BYTES_OUT available storage, should we allow receive to use
-        // it?  That might cause problems with fds - if we receive too much, we might leave fds
-        // in the kernel socket buffer that we need.  How would this happen?  Suppose that the
-        // kernel socket buffer contains MAX_BYTES_OUT + D data and MAX_FDS_OUT + F fds, and we
-        // have room for all MAX_BYTES_OUT + D data.  We will only take in MAX_FDS_OUT fds,
-        // however, and if the first MAX_BYTES_OUT msgs use all MAX_FDS_OUT fds, then the last D
-        // msgs will be starved of fds.  So we have to limit the message input to MAX_BYTES_OUT.
+        // if we have more than MAX_WORDS_OUT available storage, should we allow receive to use it?
+        // That might cause problems with fds - if we receive too much, we might leave fds in the
+        // kernel socket buffer that we need.  How would this happen?  Suppose that the kernel
+        // socket buffer contains MAX_WORDS_OUT + D data and MAX_FDS_OUT + F fds, and we have room
+        // for all MAX_WORDS_OUT + D data.  We will only take in MAX_FDS_OUT fds, however, and if
+        // the msgs in the first MAX_WORDS_OUT use all MAX_FDS_OUT fds, then the msgs in the last D
+        // will be starved of fds.  So we have to limit the message input to MAX_WORDS_OUT.
         let buf = &mut self.data[self.back..(MAX_WORDS_OUT + self.back)];
+        debug_assert_eq!(buf.len(), MAX_WORDS_OUT);
         let amount_read = stream.receive(buf, &mut self.fds)?;
         self.back += amount_read;
+        debug_assert!(self.back <= self.data.len());
         Ok(amount_read)
     }
 
     fn compact(&mut self) {
+        // Doing a compaction ensures that self.data[self.back..] is big enough to hold a max-sized
+        // message, which is MAX_WORDS_OUT.  We don't use a ring buffer (like C libwayland) because
+        // the savings of not doing any compaction copy is more than offset by the added complexity
+        // of dealing with string or array message args that wrap.
         let len = self.back - self.front;
         debug_assert!(len <= MAX_WORDS_OUT);
         // Compacting more often than absolutely necessary has a cost, but it may improve CPU
@@ -76,6 +91,7 @@ impl InBuffer {
             self.back = len;
             self.front = 0;
         }
+        debug_assert!(self.data[self.back..].len() >= MAX_WORDS_OUT);
     }
 }
 
@@ -103,22 +119,23 @@ fn initial_chunks() -> Chunks {
     new
 }
 
-const LIMIT_SENDS_TO_MAX_BYTES_OUT: bool = false;
+const LIMIT_SENDS_TO_MAX_WORDS_OUT: bool = false;
 
 impl<S: OutStream> OutBuffer<S> {
     pub(crate) fn new(stream: S) -> Self {
         #![allow(clippy::default_trait_access)]
         Self {
+            // chunks must never be empty:
             chunks: initial_chunks(),
+            // free_chunks can start life empty:
             free_chunks: Default::default(),
-            fds: VecDeque::with_capacity(MAX_FDS_OUT),
+            // fds will never grow larger than MAX_FDS_OUT + MAX_ARGS because MAX_ARGS is the most
+            // any one message can push on it, and whenever it gets larger than MAX_FDS_OUT, it will
+            // force a flush:
+            fds: VecDeque::with_capacity(MAX_FDS_OUT + MAX_ARGS),
             flush_every_send: false,
             stream,
         }
-    }
-
-    pub(crate) fn get_stream_mut(&mut self) -> &mut S {
-        &mut self.stream
     }
 
     pub(crate) fn get_stream(&self) -> &S {
@@ -126,27 +143,30 @@ impl<S: OutStream> OutBuffer<S> {
     }
 
     fn start_next_chunk(&mut self) {
-        let mut new_end: Chunks = if self.free_chunks.is_empty() {
+        let mut new_end = if self.free_chunks.is_empty() {
             initial_chunks()
         } else {
             self.free_chunks.split_off(self.free_chunks.len() - 1)
         };
+        debug_assert_eq!(new_end.len(), 1);
         let new_end_chunk = new_end.front_mut().expect(MUST_HAVE1);
         assert!(new_end_chunk.is_empty());
 
         // In some cases (MessageSender::send), we don't know until after we've put a message in the
-        // end chunk whether it extends past MAX_BYTES_OUT.  Check now, but only if we care about
-        // LIMIT_SENDS_TO_MAX_BYTES_OUT:
-        let old_end = self.end_mut();
-        if LIMIT_SENDS_TO_MAX_BYTES_OUT && old_end.len() > MAX_WORDS_OUT {
-            new_end_chunk.extend(old_end.drain(MAX_WORDS_OUT..));
+        // end chunk whether it extends past MAX_WORDS_OUT.  Check now, but only if we care about
+        // LIMIT_SENDS_TO_MAX_WORDS_OUT:
+        let old_end_chunk = self.end_mut();
+        if LIMIT_SENDS_TO_MAX_WORDS_OUT && old_end_chunk.len() > MAX_WORDS_OUT {
+            // old_end_chunk is too long for our taste, so move the end of it to the new_end_chunk
+            new_end_chunk.extend(old_end_chunk.drain(MAX_WORDS_OUT..));
         }
         self.chunks.append(&mut new_end);
     }
 
     fn is_empty(&self) -> bool {
         #![allow(dead_code)]
-        self.chunks.front().expect(MUST_HAVE1).len() == 0
+        // The whole OutBuffer is considered empty if its first chunk is empty
+        self.chunks.front().expect(MUST_HAVE1).is_empty()
     }
 
     fn end(&self) -> &Chunk {
@@ -158,17 +178,25 @@ impl<S: OutStream> OutBuffer<S> {
     }
 
     fn too_many_fds(&self) -> bool {
+        // This condition is dangerous to the receiver, because we are limited to sending
+        // MAX_FDS_OUT fds with each chunk.  If we sent all of the chunks and still had fds to send,
+        // the receiver might become starved of fds when trying to process the last message(s) sent,
+        // but we can't send fds without data to help.
         self.fds.len() > self.chunks.len() * MAX_FDS_OUT
     }
 
     pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
         let mut total_flushed = 0;
-        // self.active_chunks.len() > 1 means that there are chunks waiting to get flushed that
-        // were refused prevoiusly because the kernel socket buffer did not have room - those
-        // should always get flushed if there is now room.  The final chunk should only get
-        // flushed after all pending message traffic has been processed - meaning just before
-        // starting what might be a traffic lull.  Or when we get signalled that there's now
-        // room in the kernel socket buffer for messages we tried to flush previously.
+        // self.chunks.len() > 1 means that there are chunks waiting to get flushed that were
+        // refused prevoiusly because the kernel socket buffer did not have room - those should
+        // always get flushed if there is now room, as that maximizes message throughput by not
+        // requiring that the receiver wait longer than it has to while not trading off for fewer
+        // calls to send.  The final chunk should only get flushed after all pending message traffic
+        // has been processed - meaning just before starting what might be a traffic lull - as that
+        // does make for fewer calls to send, even though it might result in the receiver waiting
+        // longer than it has to.  Or, when we get signalled that there's now room in the kernel
+        // socket buffer for messages we tried to flush previously.  Or because we were told to
+        // flush in preference to fewer send calls.  Both of those final cases have force=true.
         while self.chunks.len() > 1 || force {
             let amount_flushed = self.flush_first_chunk()?;
             if amount_flushed == 0 {
@@ -182,30 +210,30 @@ impl<S: OutStream> OutBuffer<S> {
     fn flush_first_chunk(&mut self) -> IoResult<usize> {
         let first_chunk = self.chunks.front_mut().expect(MUST_HAVE1);
         if first_chunk.is_empty() {
+            // Nothing to do
             return Ok(0);
         }
-        let nfds = std::cmp::min(self.fds.len(), MAX_FDS_OUT);
-        let amount_flushed = if nfds > 0 {
-            let mut bfds = ArrayVec::<_, MAX_FDS_OUT>::new(); // or Vec::with_capacity(nfds)
-            bfds.extend(self.fds.iter().take(nfds).map(OwnedFd::as_fd));
-            self.stream.send(first_chunk, &bfds)?
-        } else {
-            self.stream.send(first_chunk, &[])?
+        let (nwords_flushed, nfds_flushed) = {
+            let bfds: ArrayVec<BorrowedFd, MAX_FDS_OUT> =
+                self.fds.iter().take(MAX_FDS_OUT).map(OwnedFd::as_fd).collect();
+            (self.stream.send(first_chunk, &bfds)?, bfds.len())
         };
+        debug_assert!(nwords_flushed > 0 || nfds_flushed == 0);
         // if amount_flushed == 0, then not even the fds were flushed
-        if amount_flushed > 0 {
+        if nwords_flushed > 0 {
             // If the flush happened, then we expect the whole chunk was taken:
-            debug_assert_eq!(amount_flushed, first_chunk.len());
+            debug_assert_eq!(nwords_flushed, first_chunk.len());
             // remove flushed fds, which will close the corresponding files:
-            self.fds.drain(..nfds);
+            self.fds.drain(..nfds_flushed);
             // remove flushed msg data:
             first_chunk.clear();
             if self.chunks.len() > 1 {
                 // there are other active chunks, so first_chunk needs to be popped and possibly
                 // moved to inactive_chunks
                 let rest_active_chunks = self.chunks.split_off(1);
+                // self.chunks should now only contain the first_chunk
                 debug_assert_eq!(self.chunks.len(), 1);
-                // if we are below the excess threshold, keep it, else let it drop
+                // if we are below the excess threshold, keep it in free_chunks, else let it drop
                 if self.free_chunks.len() < ALLOWED_EXCESS_CHUNKS {
                     self.free_chunks.append(&mut self.chunks);
                 }
@@ -213,7 +241,7 @@ impl<S: OutStream> OutBuffer<S> {
                 debug_assert!(!self.chunks.is_empty());
             }
         }
-        Ok(amount_flushed)
+        Ok(nwords_flushed)
     }
 
     fn add_fds(&mut self, fds: impl IntoIterator<Item = OwnedFd>) -> IoResult<()> {
@@ -225,6 +253,8 @@ impl<S: OutStream> OutBuffer<S> {
             self.flush(true)?;
             if self.too_many_fds() {
                 self.start_next_chunk();
+                // We should never need more than one start_next_chunk call to bring the number of
+                // fds per chunk to a safe level
                 debug_assert!(!self.too_many_fds());
             }
         }
@@ -250,23 +280,31 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
         // before moving on to a new one, because we don't know the message length before we allow
         // msgfun to write the message.  We could have made ExtendChunk more elaborate and test each
         // case for splitting, but that would have added complexity and possibly also made
-        // ExtendChunk slower.  Instead, we rely on the fact that each chunk has 2 * MAX_BYTES_OUT
-        // capacity, while each message can have max MAX_BYTES_OUT length.  Also, if
-        // LIMIT_SENDS_TO_MAX_BYTES_OUT is set, start_next_chunk will do splitting for us (at the
+        // ExtendChunk slower.  Instead, we rely on the fact that each chunk has 2 * MAX_WORDS_OUT
+        // capacity, while each message can have max MAX_WORDS_OUT length.  Also, if
+        // LIMIT_SENDS_TO_MAX_WORDS_OUT is set, start_next_chunk will do splitting for us (at the
         // cost of an additional copy of the split off end).
         if self.end().remaining_capacity() < MAX_WORDS_OUT {
             self.start_next_chunk();
         };
+        debug_assert!(self.end().remaining_capacity() >= MAX_WORDS_OUT);
 
         let end_chunk = self.end_mut();
         let orig_len = end_chunk.len();
-        end_chunk.extend(vec![0u32; 2]); // make room for header, which we will write below
+        // make room for header, which we will write below:
+        end_chunk.extend(vec![0u32; 2]);
         let mut header = msgfun(ExtendChunk(end_chunk));
         let new_len = end_chunk.len();
         let len = new_len - orig_len;
         debug_assert!((2..=MAX_WORDS_OUT).contains(&len));
         // fix the header.size field to the now known length and write the header:
-        header.size = u16::try_from(len).expect("Message is too long");
+        {
+            #![allow(clippy::cast_possible_truncation)]
+            // we know this won't truncate because MAX_WORDS_OUT is <= the max u16:
+            debug_assert!(u16::try_from(MAX_WORDS_OUT).is_ok());
+            header.size = len as u16;
+        };
+        // Now, write the updated header:
         end_chunk[orig_len..orig_len + 2].copy_from_slice(&header.as_words());
 
         // This flush is not forced (unless flush_every_send is true) because somewhere up the
@@ -289,20 +327,20 @@ impl<S: OutStream> MessageSender for OutBuffer<S> {
 
         let msg_len = raw_msg.len();
         let end_chunk = self.end_mut();
-        let room = if LIMIT_SENDS_TO_MAX_BYTES_OUT {
+        let room = if LIMIT_SENDS_TO_MAX_WORDS_OUT {
             MAX_WORDS_OUT - end_chunk.len()
         } else {
             end_chunk.remaining_capacity()
         };
         if room >= msg_len {
             // msg fits in end chunk
-            end_chunk.extend(raw_msg.iter().copied());
+            end_chunk.try_extend_from_slice(raw_msg).unwrap();
         } else {
             // split across 2 chunks
             let (first_part, last_part) = raw_msg.split_at(room);
-            end_chunk.extend(first_part.iter().copied());
+            end_chunk.try_extend_from_slice(first_part).unwrap();
             self.start_next_chunk();
-            self.end_mut().extend(last_part.iter().copied());
+            self.end_mut().try_extend_from_slice(last_part).unwrap();
         }
 
         self.flush(self.flush_every_send)
@@ -319,6 +357,10 @@ const COMPACT_SCHEME: CompactScheme = CompactScheme::Eager;
 const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
 const ALLOWED_EXCESS_CHUNKS: usize = 8;
 
+// ExtendChunk is a restricted-interface around Chunk that only allows adding arguments from a
+// message.  Why use a wrapper struct instead of a trait?  Because this will be the arg type of a
+// closure (the msgfun in send above), which can't take an impl Trait, and we don't need to use a
+// dyn Trait just for this.  And we will only ever need one implementation in terms of Chunk.
 pub(crate) struct ExtendChunk<'a>(pub(self) &'a mut Chunk);
 
 impl<'a> ExtendChunk<'a> {
@@ -334,6 +376,7 @@ impl<'a> ExtendChunk<'a> {
         self.0.push(data as u32);
     }
 
+    // Add an uninitialized slice of nwords, and then allow the caller to fill it.
     #[inline(always)]
     unsafe fn add_mut_slice(&mut self, nwords: usize) -> &mut [u32] {
         let orig_len = self.0.len();
@@ -347,13 +390,11 @@ impl<'a> ExtendChunk<'a> {
     #[inline(always)]
     pub(crate) fn add_array(&mut self, data: &[u8]) {
         #![allow(clippy::cast_possible_truncation)]
-        let len = data.len();
-        self.add_u32(len as u32);
-        let nwords = (len + 3) / 4;
-        let buf = unsafe {
-            let words = self.add_mut_slice(nwords);
-            to_u8_slice_mut(words)
-        };
-        buf[..len].copy_from_slice(data);
+        let nbytes = data.len();
+        self.add_u32(nbytes as u32);
+        let nwords = (nbytes + 3) / 4;
+        let words = unsafe { self.add_mut_slice(nwords) };
+        let buf = to_u8_slice_mut(words);
+        buf[..nbytes].copy_from_slice(data);
     }
 }

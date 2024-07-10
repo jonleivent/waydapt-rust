@@ -4,7 +4,7 @@
 use crate::buffers::{InBuffer, OutBuffer};
 use crate::crate_traits::{EventHandler, Messenger};
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
-use crate::input_handler::WaydaptInputHandler;
+use crate::input_handler::WaydaptMessageHandler;
 use crate::postparse::ActiveInterfaces;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
@@ -15,11 +15,9 @@ use std::os::unix::net::UnixStream;
 
 #[derive(Debug)]
 pub(crate) struct Session<'a> {
-    // I don't think we want the bufs to own the streams, because there are 4 bufs and only2
-    // streams.  Instead, we should own the streams and the buffs should borrow them.  TBD
     in_buffers: [InBuffer; 2],
     out_buffers: [OutBuffer<IOStream>; 2],
-    messenger: WaydaptInputHandler<'a>,
+    message_handler: WaydaptMessageHandler<'a>,
 }
 
 impl<'a> Session<'a> {
@@ -27,16 +25,16 @@ impl<'a> Session<'a> {
         let mut s = Self {
             in_buffers: Default::default(),
             out_buffers: streams.map(IOStream::new).map(OutBuffer::new),
-            messenger: WaydaptInputHandler::new(init_info),
+            message_handler: WaydaptMessageHandler::new(init_info),
         };
-        s.out_buffers
-            .iter_mut()
-            .for_each(|b| b.flush_every_send = init_info.options.flush_every_send);
+        for b in &mut s.out_buffers {
+            b.flush_every_send = init_info.options.flush_every_send;
+        }
         s
     }
 
-    fn receive(&mut self, index: usize) -> IoResult<usize> {
-        self.in_buffers[index].receive(self.out_buffers[index].get_stream_mut())
+    fn receive(&mut self, side: usize) -> IoResult<usize> {
+        self.in_buffers[side].receive(self.out_buffers[side].get_stream())
     }
 }
 
@@ -55,10 +53,12 @@ impl<'a> EventHandler for Session<'a> {
             // We expect that at least one whole msg is received.  But we can handle things if
             // that's not the case.
             let mut msg_count = 0u32;
-            while let Some((msg, fds)) = self.in_buffers[source_side].try_pop() {
+            let inbuf = &mut self.in_buffers[source_side];
+            let outbuf = &mut self.out_buffers[dest_side];
+            while let Some((msg, fds)) = inbuf.try_pop() {
                 msg_count += 1;
                 // We need to pass index into handle so it knows whether the msg is a request or event.
-                self.messenger.handle(index, msg, fds, &mut self.out_buffers[dest_side])?;
+                self.message_handler.handle(source_side, msg, fds, outbuf)?;
             }
             debug_assert!(msg_count > 0);
             total_msg_count += msg_count;
