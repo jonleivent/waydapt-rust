@@ -5,6 +5,7 @@
 use crate::for_handlers::MessageHandler;
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::{Result as IoResult, Write};
 pub use std::sync::OnceLock;
 
 #[derive(Debug)]
@@ -114,6 +115,36 @@ impl<'a> Interface<'a> {
     pub fn same_as(&self, other: &Interface<'a>) -> bool {
         std::ptr::eq(self, other)
     }
+
+    pub(crate) fn dump(&self, out: &mut impl Write) -> IoResult<()> {
+        let parent = if let Some(parent_interface) = self.parent.get() {
+            &parent_interface.name
+        } else {
+            "<global>"
+        };
+        writeln!(
+            out,
+            "{}[v:{}](^:{parent})[in:{}]",
+            self.name,
+            self.version().unwrap(),
+            self.owning_protocol().name
+        )?;
+        writeln!(out, " requests:")?;
+        for r in &self.requests {
+            if !r.is_active() {
+                break;
+            }
+            r.dump(out)?;
+        }
+        writeln!(out, " events:")?;
+        for e in &self.events {
+            if !e.is_active() {
+                break;
+            }
+            e.dump(out)?;
+        }
+        writeln!(out)
+    }
 }
 
 #[derive(Debug)]
@@ -125,7 +156,7 @@ pub struct Message<'a> {
     pub(crate) owner: OnceLock<&'a Interface<'a>>,
     pub(crate) new_id_interface: OnceLock<&'a Interface<'a>>,
     pub(crate) active: OnceLock<()>, // acts like an atomic bool that can only go from inactive -> active
-    pub(crate) handlers: OnceLock<VecDeque<MessageHandler>>,
+    pub(crate) handlers: OnceLock<VecDeque<(&'static str, MessageHandler)>>, // str is module name
     pub num_fds: u32,
     pub is_request: bool,
 }
@@ -160,6 +191,42 @@ impl<'a> Message<'a> {
 
     pub fn get_new_id_interface(&self) -> Option<&Interface<'a>> {
         self.new_id_interface.get().copied()
+    }
+
+    pub(crate) fn dump(&self, out: &mut impl Write) -> IoResult<()> {
+        let kind = if self.is_request { "request" } else { "event" };
+        write!(out, "{kind:>10} {}[o:{},s:{}](", self.name, self.opcode, self.since)?;
+        for arg in &self.args {
+            let typchar = match arg.typ {
+                Type::Int => 'i',
+                Type::Uint => 'u',
+                Type::Fixed => 'f',
+                Type::String => 's',
+                Type::Object => 'o',
+                Type::NewId => 'n',
+                Type::Array => 'a',
+                Type::Fd => 'h',
+            };
+            write!(out, "{typchar}")?;
+        }
+        write!(out, ")")?;
+        if let Some(nidi) = self.new_id_interface.get() {
+            write!(out, "<n:{}>", nidi.name)?;
+        }
+        if let Some(handlers) = self.handlers.get() {
+            write!(out, "h:[")?;
+            let mut first = true;
+            for (modname, _) in handlers {
+                if first {
+                    first = false;
+                } else {
+                    write!(out, ", ")?;
+                };
+                write!(out, "{modname}")?;
+            }
+            write!(out, "]")?;
+        }
+        writeln!(out)
     }
 }
 

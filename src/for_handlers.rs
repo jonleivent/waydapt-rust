@@ -3,13 +3,12 @@
 pub use crate::message::ArgData;
 pub use crate::postparse::ActiveInterfaces;
 pub use crate::protocol::{Interface, Message};
-use std::cell::Cell;
 
 pub trait MessageInfo<'a> {
     fn get_num_args(&self) -> usize;
     fn get_arg(&self, index: usize) -> &ArgData<'a>;
     fn get_arg_mut(&mut self, index: usize) -> &mut ArgData<'a>;
-    fn get_cell_args(&mut self) -> &[Cell<ArgData<'a>>];
+    fn get_args_mut(&mut self) -> &mut [ArgData<'a>];
     fn get_decl(&self) -> &'static Message<'static>;
     fn get_object_id(&self) -> u32;
     fn set_arg(&mut self, index: usize, a: ArgData<'a>);
@@ -24,6 +23,7 @@ pub trait SessionInitInfo {
 pub type RInterface = &'static Interface<'static>;
 
 pub trait SessionInfo: SessionInitInfo {
+    fn try_lookup(&self, id: u32) -> Option<RInterface>;
     fn lookup(&self, id: u32) -> RInterface;
     fn add(&mut self, id: u32, interface: RInterface);
     fn delete(&mut self, id: u32);

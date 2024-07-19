@@ -1,21 +1,17 @@
 #![warn(clippy::pedantic)]
-#![allow(unused)]
 #![forbid(unsafe_code)]
 
-use nix::NixPath;
 use std::env;
 use std::fs::{remove_file, File, Metadata};
 use std::ops::Deref;
-use std::os::unix::io::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::process;
+use std::sync::OnceLock;
 
 pub(crate) struct SocketListener {
     socket_path: PathBuf,
     unix_listener: UnixListener,
     lock_path: PathBuf,
-    lock_fd: OwnedFd,
     do_removes: bool,
 }
 
@@ -61,13 +57,12 @@ impl SocketListener {
             xdg_runtime_dir.join(display_name)
         };
         let lock_path = socket_path.with_extension("lock");
-        let lock_fd = lock_file(&lock_path).into();
+        lock_file(&lock_path);
         if socket_path.try_exists().unwrap() {
             remove_file(&socket_path).unwrap();
         }
         let unix_listener = UnixListener::bind(&socket_path).unwrap();
-        let pid_when_created = process::id();
-        Self { socket_path, unix_listener, lock_path, lock_fd, do_removes: true }
+        Self { socket_path, unix_listener, lock_path, do_removes: true }
     }
 
     pub(crate) fn drop_without_removes(mut self) {
@@ -83,7 +78,6 @@ fn metadata_eq(meta1: &Metadata, meta2: &Metadata) -> bool {
 fn file_still_at_path(file: &File, path: &PathBuf) -> bool {
     use std::fs::metadata;
     use std::io::ErrorKind;
-    use std::os::unix::fs::OpenOptionsExt;
     let file_meta = file.metadata().unwrap();
     match metadata(path) {
         Ok(disk_meta) => metadata_eq(&file_meta, &disk_meta),
@@ -92,13 +86,13 @@ fn file_still_at_path(file: &File, path: &PathBuf) -> bool {
     }
 }
 
-fn lock_file(path: &PathBuf) -> File {
+fn lock_file(path: &PathBuf) {
     // panics if it can't lock
     use rustix::fs::{flock, FlockOperation};
     use std::os::unix::fs::OpenOptionsExt;
     loop {
         let lock_file = File::options()
-            .truncate(true)
+            .truncate(false)
             .create(true)
             .read(true)
             .write(true)
@@ -114,24 +108,29 @@ fn lock_file(path: &PathBuf) -> File {
         // the socket vs. subsequent server startups.  So loop to make sure that we flock the
         // same file that we opened/created.
         if file_still_at_path(&lock_file, path) {
-            return lock_file;
+            return;
         }
     }
 }
 
-// get the path to the wayland server's (not our!) socket
-pub(crate) fn get_server_socket_path() -> PathBuf {
-    let socket_path: PathBuf = env::var("WAYLAND_DISPLAY").unwrap_or("wayland-0".into()).into();
-    if socket_path.is_absolute() {
-        return socket_path;
-    }
-    let Ok(xdg_runtime_dir) = env::var("XDG_RUNTIME_DIR") else {
-        panic!("XDG_RUNTIME_DIR is not set")
-    };
-    let xdg_runtime_path = PathBuf::from(xdg_runtime_dir);
-    assert!(
-        xdg_runtime_path.is_absolute(),
-        "XDG_RUNTIME_DIR is not absolute: {xdg_runtime_path:?}"
-    );
-    xdg_runtime_path.join(socket_path)
+// get the path to the wayland server's (not our!) socket.  This is done for every client session,
+// but never changes, so memoize in a static.
+pub(crate) fn get_server_socket_path() -> &'static PathBuf {
+    static SOCKET_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+    SOCKET_PATH.get_or_init(|| {
+        let socket_path: PathBuf = env::var("WAYLAND_DISPLAY").unwrap_or("wayland-0".into()).into();
+        if socket_path.is_absolute() {
+            return socket_path;
+        }
+        let Ok(xdg_runtime_dir) = env::var("XDG_RUNTIME_DIR") else {
+            panic!("XDG_RUNTIME_DIR is not set")
+        };
+        let xdg_runtime_path = PathBuf::from(xdg_runtime_dir);
+        assert!(
+            xdg_runtime_path.is_absolute(),
+            "XDG_RUNTIME_DIR is not absolute: {xdg_runtime_path:?}"
+        );
+        xdg_runtime_path.join(socket_path)
+    })
 }

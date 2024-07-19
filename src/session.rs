@@ -2,9 +2,9 @@
 #![forbid(unsafe_code)]
 
 use crate::buffers::{InBuffer, OutBuffer};
-use crate::crate_traits::{EventHandler, Messenger};
+use crate::crate_traits::EventHandler;
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
-use crate::input_handler::WaydaptMessageHandler;
+use crate::input_handler::Mediator;
 use crate::postparse::ActiveInterfaces;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
@@ -15,32 +15,30 @@ use std::os::unix::net::UnixStream;
 
 #[derive(Debug)]
 pub(crate) struct Session<'a> {
-    in_buffers: [InBuffer; 2],
-    out_buffers: [OutBuffer<IOStream>; 2],
-    message_handler: WaydaptMessageHandler<'a>,
+    in_buffers: [InBuffer<'a>; 2],
+    out_buffers: [OutBuffer<'a>; 2],
+    mediator: Mediator<'a>,
+    fds: [BorrowedFd<'a>; 2],
 }
 
 impl<'a> Session<'a> {
-    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo, streams: [UnixStream; 2]) -> Self {
+    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo, streams: [&'a IOStream; 2]) -> Self {
         let mut s = Self {
-            in_buffers: Default::default(),
-            out_buffers: streams.map(IOStream::new).map(OutBuffer::new),
-            message_handler: WaydaptMessageHandler::new(init_info),
+            in_buffers: streams.map(InBuffer::new),
+            out_buffers: streams.map(OutBuffer::new),
+            mediator: Mediator::new(init_info),
+            fds: streams.map(AsFd::as_fd),
         };
         for b in &mut s.out_buffers {
             b.flush_every_send = init_info.options.flush_every_send;
         }
         s
     }
-
-    fn receive(&mut self, side: usize) -> IoResult<usize> {
-        self.in_buffers[side].receive(self.out_buffers[side].get_stream())
-    }
 }
 
 impl<'a> EventHandler for Session<'a> {
     fn fds_to_monitor(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
-        self.out_buffers.iter().map(|b| b.get_stream().as_fd())
+        self.fds.into_iter()
     }
 
     fn handle_input(&mut self, index: usize) -> IoResult<()> {
@@ -48,25 +46,27 @@ impl<'a> EventHandler for Session<'a> {
         // events, which may give higher performance:
         // https://thelinuxcode.com/epoll-7-c-function/
         let (source_side, dest_side) = (index, 1 - index);
+        let inbuf = &mut self.in_buffers[source_side];
+        let outbuf = &mut self.out_buffers[dest_side];
         let mut total_msg_count = 0u32;
-        while self.receive(source_side)? > 0 {
+
+        while inbuf.receive()? > 0 {
             // We expect that at least one whole msg is received.  But we can handle things if
             // that's not the case.
             let mut msg_count = 0u32;
-            let inbuf = &mut self.in_buffers[source_side];
-            let outbuf = &mut self.out_buffers[dest_side];
             while let Some((msg, fds)) = inbuf.try_pop() {
                 msg_count += 1;
                 // We need to pass index into handle so it knows whether the msg is a request or event.
-                self.message_handler.handle(source_side, msg, fds, outbuf)?;
+                self.mediator.mediate(source_side, msg, fds, outbuf)?;
             }
             debug_assert!(msg_count > 0);
             total_msg_count += msg_count;
         }
+
         if total_msg_count > 0 {
             // Force flush because we don't know when we will be back here, so waiting to
             // flush any part might starve the receiver.
-            self.out_buffers[dest_side].flush(true)?;
+            outbuf.flush(true)?;
         }
         Ok(())
     }
@@ -110,29 +110,30 @@ impl SessionInitInfo for WaydaptSessionInitInfo {
 // Otherwise panic or quivalent (unwrap).  Everything in here should just panic:
 pub(crate) fn client_session(
     options: &'static crate::setup::WaydaptOptions, active_interfaces: &'static ActiveInterfaces,
-    session_handlers: &VecDeque<SessionInitHandler>, client_stream: UnixStream,
+    session_handlers: &VecDeque<SessionInitHandler>, client_stream: &UnixStream,
 ) {
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
 
+    let server_socket_path = crate::listener::get_server_socket_path();
     // Consider a case where the wayland server's socket was deleted.  That should only prevent
     // future clients from connecting, it should not cause existing clients to exit.  So unwrap
     // instead of multithread_exit:
-    let server_stream = UnixStream::connect(&options.server_socket_path).unwrap();
+    let server_stream = UnixStream::connect(server_socket_path).unwrap();
 
     // When would get_socket_peercred ever fail, given that we know the arg is correct?
     // Probably never.  Does it matter then how we handle it?:
-    let ucred = get_socket_peercred(&client_stream).unwrap();
+    let ucred = get_socket_peercred(client_stream).unwrap();
     let init_info = WaydaptSessionInitInfo { ucred, active_interfaces, options };
 
     // options.terminate can only be Some(duration) if options.fork_sessions is false, meaning we
     // are in multi-threaded mode:
     #[forbid(let_underscore_drop)]
-    let _st = options.terminate.map(SessionTerminator::new);
+    let _st = options.terminate_after.map(SessionTerminator::new);
 
     session_handlers.iter().for_each(|h| h(&init_info));
 
-    let mut session = Session::new(&init_info, [client_stream, server_stream]);
+    let mut session = Session::new(&init_info, [client_stream, &server_stream]);
 
     crate::event_loop::event_loop(&mut session).unwrap();
 }

@@ -3,10 +3,12 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
+use crate::crate_traits::Alloc;
 use bumpalo::Bump;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::{Result as IoResult, Write};
 use std::path::PathBuf;
 
 type ActiveInterfaceMap<'a> = HashMap<&'a str, &'a Interface<'a>>;
@@ -20,15 +22,29 @@ pub type ActiveInterfaces = ActiveInterfacesA<'static>;
 type InterfaceMap<'a> = HashMap<&'a str, Vec<&'a Interface<'a>>>;
 type AllProtocols<'a> = [&'a Protocol<'a>];
 
+impl Alloc for Bump {
+    fn alloc<T>(&self, it: T) -> &mut T {
+        self.alloc(it)
+    }
+}
+
+struct Leaker;
+
+impl Alloc for Leaker {
+    fn alloc<T>(&self, it: T) -> &mut T {
+        Box::leak(Box::new(it))
+    }
+}
+
 pub(crate) fn active_interfaces(
-    protocol_filenames: impl Iterator<Item = PathBuf>, globals_filename: &str,
+    protocol_filenames: impl IntoIterator<Item = PathBuf>, globals_filename: &str,
 ) -> &'static ActiveInterfaces {
     static ACTIVE_INTERFACES: OnceLock<&ActiveInterfaces> = OnceLock::new();
     ACTIVE_INTERFACES.get_or_init(|| {
         let bump = Box::leak(Box::new(Bump::new()));
         let mut all_protocols: Vec<&'static Protocol<'static>> = Vec::new();
         let mut maybe_display = None; // wl_display must exist
-        for ref protocol_filename in protocol_filenames {
+        for protocol_filename in protocol_filenames {
             let file = File::open(protocol_filename).unwrap();
             let protocol = super::parse::parse(file, bump);
             if protocol.name == "wayland" {
@@ -71,6 +87,13 @@ impl<'a> ActiveInterfacesA<'a> {
     }
     pub fn get_display(&self) -> &'a Interface<'a> {
         self.display
+    }
+
+    pub(crate) fn dump(&self, out: &mut impl Write) -> IoResult<()> {
+        for interface in self.map.values() {
+            interface.dump(out)?;
+        }
+        Ok(())
     }
 }
 
@@ -135,7 +158,7 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
 }
 
 fn get_globals_limits(parentless: &InterfaceMap, filename: &str) {
-    for (n, name, version_limit) in GlobalLimits::iter(filename) {
+    for (n, ref name, version_limit) in global_limits(filename) {
         match parentless.get(name.as_str()).map(Vec::as_slice) {
             Some([interface @ Interface { parsed_version, limited_version, .. }]) => {
                 // a global (or other) interface is considered active if its limited_version is set
@@ -251,35 +274,33 @@ impl<'a> Message<'a> {
     }
 }
 
-use std::io::{BufRead, BufReader, Lines};
-use std::iter::{Iterator, Zip};
-use std::ops::RangeFrom;
-
-struct GlobalLimits<'a> {
+struct GlobalLimits<'a, LI> {
     filename: &'a str,
-    line_iter: Zip<RangeFrom<usize>, Lines<BufReader<File>>>, //impl Iterator<Item = (usize, Result<String, Error>)>,
+    line_iter: LI,
 }
 
-impl<'a> GlobalLimits<'a> {
-    fn iter(filename: &'a str) -> Self {
-        let file = File::open(filename).unwrap_or_else(|e| panic!("Cannot open {filename}: {e}"));
-        let reader = BufReader::new(file);
-        let line_iter = (1..).zip(reader.lines());
-        Self { filename, line_iter }
-    }
+fn global_limits(filename: &str) -> impl Iterator<Item = (usize, String, u32)> + '_ {
+    use std::io::{BufRead, BufReader};
+    let file = File::open(filename).unwrap_or_else(|e| panic!("Cannot open {filename}: {e}"));
+    let reader = BufReader::new(file);
+    let line_iter = (1..).zip(reader.lines());
+    GlobalLimits { filename, line_iter }
 }
 
-impl<'a> Iterator for GlobalLimits<'a> {
+impl<'a, LI> Iterator for GlobalLimits<'a, LI>
+where
+    LI: Iterator<Item = (usize, IoResult<String>)>,
+{
     type Item = (usize, String, u32);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((n, line)) = self.line_iter.next() {
+        for (n, line) in &mut self.line_iter {
             let filename = self.filename;
             let line = line.unwrap_or_else(|e| panic!("Error in {filename}, line {n}: {e}"));
             let mut fields = line.split_whitespace();
-            let Some(name) = fields.next() else { return self.next() }; // skip blank lines
+            let Some(name) = fields.next() else { continue }; // skip blank lines
             if name.starts_with('#') {
-                return self.next();
+                continue;
             }; // skip comments
             let Some(version_field) = fields.next() else {
                 panic!("Missing version limit field for global {name} in global limits file {filename} line {n}")
@@ -292,10 +313,9 @@ impl<'a> Iterator for GlobalLimits<'a> {
             };
             // make version_limit == 0 act like unlimited
             let version_limit = if version_limit > 0 { version_limit } else { u32::MAX };
-            Some((n, name.to_string(), version_limit))
-        } else {
-            None
+            return Some((n, name.to_string(), version_limit));
         }
+        None
     }
 }
 

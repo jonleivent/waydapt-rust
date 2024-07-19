@@ -1,22 +1,22 @@
 #![warn(clippy::pedantic)]
 #![allow(dead_code)]
-//#![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 
-use arrayvec::ArrayVec;
-
-use crate::basics::{round4, to_u8_slice, MAX_ARGS};
-use crate::crate_traits::{FdInput, MessageSender};
-use crate::for_handlers::MessageInfo;
+use crate::basics::{round4, to_u8_slice};
+use crate::crate_traits::{FdInput as FI, Messenger as MO};
+use crate::for_handlers::{MessageInfo, SessionInfo as Info};
 use crate::header::MessageHeader;
-use crate::input_handler::IdMap;
 use crate::map::WL_SERVER_ID_START;
-use crate::postparse::ActiveInterfaces;
 use crate::protocol::{Interface, Message, Type};
+use rustix::fd::AsRawFd;
+use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::cell::Cell;
 use std::ffi::CStr;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
+
+type RMessage = &'static Message<'static>;
+type RInterface = &'static Interface<'static>;
 
 #[derive(Debug)]
 pub enum ArgData<'a> {
@@ -25,22 +25,26 @@ pub enum ArgData<'a> {
     Fixed(i32),
     String(Cow<'a, CStr>),
     Object(u32),
-    NewId { id: u32, interface: &'static Interface<'static> },
+    NewId { id: u32, interface: RInterface },
     Array(Cow<'a, [u8]>),
     Fd { index: usize },
 }
 
+// What if args was just a vec of u16 offsets from the front of the msg?  We can then register
+// changes in a separate field.  The fds would still be in their own field, and the fd offsets would
+// be indexes into that instead.
+
+type InlineVec<T> = SmallVec<[T; 2]>;
+
 pub(crate) struct DemarshalledMessage<'a> {
     msg_decl: RMessage,
     header: MessageHeader,
-    args: ArrayVec<ArgData<'a>, MAX_ARGS>,
+    args: InlineVec<ArgData<'a>>,
     source: &'a [u32],
     maybe_modified: bool,
     maybe_arg_type_changed: bool,
-    fds: ArrayVec<OwnedFd, MAX_ARGS>,
+    fds: InlineVec<OwnedFd>,
 }
-
-type RMessage = &'static Message<'static>;
 
 impl<'a> DemarshalledMessage<'a> {
     fn add_int(&mut self, data: &[u32]) -> usize {
@@ -96,12 +100,9 @@ impl<'a> DemarshalledMessage<'a> {
         0
     }
 
-    fn add_new_id(
-        &mut self, data: &'a [u32], id_map: &'_ mut IdMap,
-        active_interfaces: &'static ActiveInterfaces,
-    ) -> usize {
+    fn add_new_id(&mut self, data: &'a [u32], info: &mut impl Info) -> usize {
         let Some(interface) = self.msg_decl.get_new_id_interface() else {
-            return self.add_wl_registry_bind_new_id(data, id_map, active_interfaces);
+            return self.add_wl_registry_bind_new_id(data, info);
         };
         let id = data[0];
         // check if this is a wayland-idfix delete_id request:
@@ -120,16 +121,13 @@ impl<'a> DemarshalledMessage<'a> {
             // predictable way.
             self.args.push(ArgData::Object(id));
         } else {
-            id_map.add(id, interface);
+            info.add(id, interface);
             self.args.push(ArgData::NewId { id, interface });
         }
         1
     }
 
-    fn add_wl_registry_bind_new_id(
-        &mut self, data: &'a [u32], id_map: &'_ mut IdMap,
-        active_interfaces: &'static ActiveInterfaces,
-    ) -> usize {
+    fn add_wl_registry_bind_new_id(&mut self, data: &'a [u32], info: &mut impl Info) -> usize {
         // Right now, only wl_registry::bind can have such an arg, but we could potentially handle
         // others.
         assert!(self.msg_decl.is_wl_registry_bind());
@@ -141,7 +139,7 @@ impl<'a> DemarshalledMessage<'a> {
         let (len, s) = self.add_string_internal(data);
         let rest = &data[len..];
         let name = s.to_str().unwrap();
-        let interface = active_interfaces.get_global(name);
+        let interface = info.get_active_interfaces().get_global(name);
         let version = rest[0];
         let id = rest[1];
         let limited_version = *interface.version().unwrap(); // if none, then not active
@@ -149,16 +147,14 @@ impl<'a> DemarshalledMessage<'a> {
             version <= limited_version,
             "Client attempted to bind version {version} > {limited_version} on {interface}"
         );
-        id_map.add(id, interface);
+        info.add(id, interface);
         self.args.push(ArgData::Uint(version));
         self.args.push(ArgData::NewId { id, interface });
         len + 2
     }
 
-    fn init(
-        &mut self, id_map: &'_ mut IdMap, mut data: &'a [u32], fds: &'_ mut impl FdInput,
-        active_interfaces: &'static ActiveInterfaces,
-    ) {
+    pub(crate) fn demarshal(&mut self, fds: &mut impl FI, info: &mut impl Info) {
+        let mut data = &self.source[2..];
         for arg in self.msg_decl.get_args() {
             let arg_len = match arg.typ {
                 Type::Int => self.add_int(data),
@@ -166,7 +162,7 @@ impl<'a> DemarshalledMessage<'a> {
                 Type::Fixed => self.add_fixed(data),
                 Type::String => self.add_string(data),
                 Type::Object => self.add_object(data),
-                Type::NewId => self.add_new_id(data, id_map, active_interfaces),
+                Type::NewId => self.add_new_id(data, info),
                 Type::Array => self.add_array(data),
                 Type::Fd => self.add_fd(fds.try_take_fd().expect("Not enough FDs")),
             };
@@ -176,22 +172,18 @@ impl<'a> DemarshalledMessage<'a> {
     }
 
     #[cold]
-    pub(crate) fn new(
-        header: MessageHeader, msg_decl: RMessage, data: &'a [u32], fds: &'_ mut impl FdInput,
-        id_map: &'_ mut IdMap, active_interfaces: &'static ActiveInterfaces,
-    ) -> Self {
+    pub(crate) fn new(header: MessageHeader, msg_decl: RMessage, data: &'a [u32]) -> Self {
         assert_eq!(header.size as usize, data.len());
-        let mut s = Self {
+        #[allow(clippy::default_trait_access)]
+        Self {
             msg_decl,
             header,
-            args: ArrayVec::new(),
+            args: SmallVec::with_capacity(msg_decl.args.len()),
             source: data,
             maybe_modified: false,
             maybe_arg_type_changed: false,
-            fds: ArrayVec::new(),
-        };
-        s.init(id_map, &data[2..], fds, active_interfaces);
-        s
+            fds: SmallVec::with_capacity(msg_decl.num_fds as usize),
+        }
     }
 
     fn test_arg_invariant(&self) {
@@ -202,18 +194,18 @@ impl<'a> DemarshalledMessage<'a> {
         );
     }
 
-    fn output_modified_check_types(self, sender: &mut impl MessageSender) -> IoResult<usize> {
+    fn marshal_modified_check_types(self, sender: &mut impl MO) -> IoResult<usize> {
         self.test_arg_invariant();
         sender.send(self.fds, |mut ext| {
-            for arg_typ in self.args.into_iter().zip(self.msg_decl.args.iter().map(|a| a.typ)) {
+            for arg_typ in self.args.iter().zip(self.msg_decl.args.iter().map(|a| a.typ)) {
                 match arg_typ {
-                    (ArgData::Int(i), Type::Int) => ext.add_i32(i),
-                    (ArgData::Uint(u), Type::Uint) => ext.add_u32(u),
-                    (ArgData::Fixed(f), Type::Fixed) => ext.add_i32(f),
+                    (ArgData::Int(i), Type::Int) => ext.add_i32(*i),
+                    (ArgData::Uint(u), Type::Uint) => ext.add_u32(*u),
+                    (ArgData::Fixed(f), Type::Fixed) => ext.add_i32(*f),
                     (ArgData::String(s), Type::String) => ext.add_array(s.to_bytes_with_nul()),
-                    (ArgData::Object(i), Type::Object) => ext.add_u32(i),
-                    (ArgData::NewId { id, .. }, Type::NewId) => ext.add_u32(id),
-                    (ArgData::Array(a), Type::Array) => ext.add_array(&a),
+                    (ArgData::Object(i), Type::Object) => ext.add_u32(*i),
+                    (ArgData::NewId { id, .. }, Type::NewId) => ext.add_u32(*id),
+                    (ArgData::Array(a), Type::Array) => ext.add_array(a),
                     (ArgData::Fd { .. }, Type::Fd) => {} // TBD: check index?
                     (arg, typ) => panic!("{arg:?} vs. {typ:?} mismatch"),
                 };
@@ -222,17 +214,17 @@ impl<'a> DemarshalledMessage<'a> {
         })
     }
 
-    fn output_modified(self, sender: &mut impl MessageSender) -> IoResult<usize> {
+    fn marshal_modified(self, sender: &mut impl MO) -> IoResult<usize> {
         sender.send(self.fds, |mut ext| {
-            for arg in self.args {
+            for arg in &self.args {
                 match arg {
-                    ArgData::Int(i) => ext.add_i32(i),
-                    ArgData::Uint(u) => ext.add_u32(u),
-                    ArgData::Fixed(f) => ext.add_i32(f),
+                    ArgData::Int(i) => ext.add_i32(*i),
+                    ArgData::Uint(u) => ext.add_u32(*u),
+                    ArgData::Fixed(f) => ext.add_i32(*f),
                     ArgData::String(s) => ext.add_array(s.to_bytes_with_nul()),
-                    ArgData::Object(i) => ext.add_u32(i),
-                    ArgData::NewId { id, .. } => ext.add_u32(id),
-                    ArgData::Array(a) => ext.add_array(&a),
+                    ArgData::Object(i) => ext.add_u32(*i),
+                    ArgData::NewId { id, .. } => ext.add_u32(*id),
+                    ArgData::Array(a) => ext.add_array(a),
                     ArgData::Fd { .. } => {} // TBD: check index?
                 };
             }
@@ -240,19 +232,70 @@ impl<'a> DemarshalledMessage<'a> {
         })
     }
 
-    pub(crate) fn output(self, sender: &mut impl MessageSender) -> IoResult<usize> {
+    pub(crate) fn marshal(self, sender: &mut impl MO) -> IoResult<usize> {
         if self.maybe_arg_type_changed {
-            self.output_modified_check_types(sender)
+            self.marshal_modified_check_types(sender)
         } else if self.maybe_modified {
-            self.output_modified(sender)
+            self.marshal_modified(sender)
         } else {
-            self.output_unmodified(sender)
+            self.relay_unmodified(sender)
         }
     }
 
-    pub(crate) fn output_unmodified(self, sender: &mut impl MessageSender) -> IoResult<usize> {
+    pub(crate) fn relay_unmodified(self, sender: &mut impl MO) -> IoResult<usize> {
         debug_assert!(!self.maybe_modified);
         sender.send_raw(self.fds, self.source)
+    }
+}
+
+mod debug {
+    use super::{ArgData, AsRawFd, DemarshalledMessage, Info, RInterface};
+
+    impl<'a> DemarshalledMessage<'a> {
+        pub(crate) fn debug_print(&self, info: &impl Info) {
+            let mut first = true;
+            for arg in &self.args {
+                if first {
+                    first = false;
+                } else {
+                    eprint!(", ");
+                }
+                match arg {
+                    ArgData::Int(i) => eprint!("{i}"),
+                    ArgData::Uint(u) => eprint!("{u}"),
+                    ArgData::Fixed(f) => debug_print_wayland_fixed(*f),
+                    ArgData::String(s) if s.is_empty() => eprint!("nil"),
+                    ArgData::String(s) => eprint!("{s:?}"),
+                    ArgData::Object(i) => debug_print_object_id(*i, info),
+                    ArgData::NewId { id, interface } => debug_print_new_id(*id, interface),
+                    ArgData::Array(a) => eprint!("array[{}]", a.len()),
+                    ArgData::Fd { index } => eprint!("fd {}", self.fds[*index].as_raw_fd()),
+                }
+            }
+        }
+    }
+
+    fn debug_print_wayland_fixed(f: i32) {
+        const MOD: i32 = 256;
+        const TEN8: i32 = 100_000_000;
+        const MAGIC: i32 = TEN8 / MOD;
+        if f >= 0 {
+            eprint!("{}.{:08}", f / MOD, MAGIC * (f % MOD));
+        } else {
+            eprint!("-{}.{:08}", f / -MOD, -MAGIC * (f % MOD));
+        }
+    }
+
+    fn debug_print_object_id(id: u32, info: &impl Info) {
+        let name = match info.try_lookup(id) {
+            Some(interface) => &interface.name,
+            None => "<unknown interface>",
+        };
+        eprint!("{name}#{id}");
+    }
+
+    fn debug_print_new_id(id: u32, interface: RInterface) {
+        eprint!("new_id {}${id}", &interface.name);
     }
 }
 
@@ -271,10 +314,10 @@ impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
         &mut self.args[index]
     }
 
-    fn get_cell_args(&mut self) -> &[Cell<ArgData<'a>>] {
+    fn get_args_mut(&mut self) -> &mut [ArgData<'a>] {
         self.maybe_modified = true;
         self.maybe_arg_type_changed = true;
-        Cell::from_mut(self.args.as_mut_slice()).as_slice_of_cells()
+        self.args.as_mut_slice()
     }
 
     fn get_decl(&self) -> &'static Message<'static> {

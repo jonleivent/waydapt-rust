@@ -6,8 +6,6 @@ use epoll::{CreateFlags, Event, EventData, EventFlags, EventVec};
 use rustix::event::epoll;
 use std::io::Result as IoResult;
 
-// TBD: how important is having a messenger arg if it only gets passed into handle_input?
-
 pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()> {
     let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
     let fds = event_handler.fds_to_monitor();

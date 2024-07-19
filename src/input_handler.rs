@@ -3,17 +3,18 @@
 #![forbid(unsafe_code)]
 
 use crate::buffers::OutBuffer;
-use crate::crate_traits::{ClientPeer, FdInput, MessageSender, Messenger, ServerPeer};
+use crate::crate_traits::{ClientPeer, FdInput, Messenger, ServerPeer};
+#[allow(clippy::enum_glob_use)]
 use crate::for_handlers::{
-    AddHandler, ArgData, MessageHandlerResult, MessageInfo, RInterface, SessionInfo,
-    SessionInitInfo,
+    AddHandler, ArgData, MessageHandlerResult, MessageHandlerResult::*, MessageInfo, RInterface,
+    SessionInfo, SessionInitInfo,
 };
 use crate::header::MessageHeader;
 use crate::map::{WaylandObjectMap, WL_SERVER_ID_START};
 use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
+use crate::protocol::Message;
 use crate::session::WaydaptSessionInitInfo;
-use crate::streams::IOStream;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
@@ -26,6 +27,10 @@ use std::sync::OnceLock;
 impl FdInput for VecDeque<OwnedFd> {
     fn try_take_fd(&mut self) -> Option<OwnedFd> {
         self.pop_front()
+    }
+
+    fn drain(&mut self, num: usize) -> impl Iterator<Item = OwnedFd> {
+        self.drain(..num)
     }
 }
 
@@ -42,12 +47,16 @@ impl IdMap {
         Self { client_id_map: WaylandObjectMap::new(), server_id_map: WaylandObjectMap::new() }
     }
 
-    pub(crate) fn lookup(&self, id: u32) -> RInterface {
-        let i = if id >= WL_SERVER_ID_START {
+    pub(crate) fn try_lookup(&self, id: u32) -> Option<RInterface> {
+        if id >= WL_SERVER_ID_START {
             self.server_id_map.lookup(id)
         } else {
             self.client_id_map.lookup(id)
-        };
+        }
+    }
+
+    pub(crate) fn lookup(&self, id: u32) -> RInterface {
+        let i = self.try_lookup(id);
         i.unwrap_or_else(|| panic!("No interface for object id {id}"))
     }
 
@@ -68,28 +77,13 @@ impl IdMap {
     }
 }
 
-// This should hold all marshal/demarshal relevant info, including object id maps.  Maybe rename it?
 #[derive(Debug)]
-pub(crate) struct WaydaptMessageHandler<'a> {
+pub(crate) struct Mediator<'a> {
     id_map: IdMap,
     init_info: &'a WaydaptSessionInitInfo,
-} // TBD
-
-impl<'a> WaydaptMessageHandler<'a> {
-    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo) -> Self {
-        let mut s = Self { id_map: IdMap::new(), init_info };
-        // the client id map always has the wl_display interface at id 1:
-        s.id_map.add(1, init_info.active_interfaces.get_display());
-        s
-    }
 }
 
-struct WaydaptSessionInfo<'a> {
-    id_map: &'a mut IdMap,
-    init_info: &'a WaydaptSessionInitInfo,
-}
-
-impl<'a> SessionInitInfo for WaydaptSessionInfo<'a> {
+impl<'a> SessionInitInfo for Mediator<'a> {
     fn ucred(&self) -> rustix::net::UCred {
         self.init_info.ucred
     }
@@ -99,7 +93,11 @@ impl<'a> SessionInitInfo for WaydaptSessionInfo<'a> {
     }
 }
 
-impl<'a> SessionInfo for WaydaptSessionInfo<'a> {
+impl<'a> SessionInfo for Mediator<'a> {
+    fn try_lookup(&self, id: u32) -> Option<RInterface> {
+        self.id_map.try_lookup(id)
+    }
+
     fn lookup(&self, id: u32) -> RInterface {
         self.id_map.lookup(id)
     }
@@ -113,60 +111,172 @@ impl<'a> SessionInfo for WaydaptSessionInfo<'a> {
     }
 }
 
-impl<'a> Messenger for WaydaptMessageHandler<'a> {
-    type FI = VecDeque<OwnedFd>;
-    type MO = OutBuffer<IOStream>;
+impl<'a> Mediator<'a> {
+    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo) -> Self {
+        let mut s = Self { id_map: IdMap::new(), init_info };
+        // the id map always has the wl_display interface at id 1:
+        s.id_map.add(1, init_info.active_interfaces.get_display());
+        s
+    }
 
-    fn handle(
-        &mut self, index: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MO,
+    pub(crate) fn mediate(
+        &mut self, index: usize, in_msg: &[u32], in_fds: &mut impl FdInput, out: &mut OutBuffer,
     ) -> IoResult<()> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;
         let header = MessageHeader::new(in_msg);
-        let interface = self.id_map.lookup(header.object_id);
+        let interface = self.lookup(header.object_id);
         let msg_decl = interface.get_message(from_server, header.opcode as usize);
-        let active_interfaces = self.init_info.active_interfaces;
         if let Some(handlers) = msg_decl.handlers.get() {
-            let mut demarsh = DemarshalledMessage::new(
-                header,
-                msg_decl,
-                in_msg,
-                in_fds,
-                &mut self.id_map,
-                active_interfaces,
-            );
-            let mut session_info =
-                WaydaptSessionInfo { id_map: &mut self.id_map, init_info: self.init_info };
-            for h in handlers {
-                match h(&mut demarsh, &mut session_info) {
-                    MessageHandlerResult::Next => continue,
-                    MessageHandlerResult::Send => break,
-                    MessageHandlerResult::Drop => return Ok(()),
+            let mut dmsg = DemarshalledMessage::new(header, msg_decl, in_msg);
+            dmsg.demarshal(in_fds, self);
+            self.debug_in(header, msg_decl, &dmsg, from_server);
+            for (_mod_name, h) in handlers {
+                // since we have the mod name, we can debug each h call along with their result - TBD
+                match h(&mut dmsg, self) {
+                    Next => continue,
+                    Send => break,
+                    Drop => {
+                        self.debug_drop(header, msg_decl, from_server);
+                        return Ok(());
+                    }
                 }
             }
-            demarsh.output(out)?;
-        } else if msg_decl.new_id_interface.get().is_some() {
-            // Demarshal just to process new_id arg.  We could optimize this to only do the work
-            // needed to eventually call id_map.add for the new_id, but in most cases, a new_id
-            // bearing message will have very few other arguments (usually none), so the wasted work
-            // is minimal.  Best to keep the same code path:
-            let demarsh = DemarshalledMessage::new(
-                header,
-                msg_decl,
-                in_msg,
-                in_fds,
-                &mut self.id_map,
-                active_interfaces,
-            );
-            demarsh.output_unmodified(out)?;
+            self.debug_out(header, msg_decl, &dmsg, from_server);
+            dmsg.marshal(out)?;
+        } else if msg_decl.new_id_interface.get().is_some()
+            || self.init_info.options.debug_level != 0
+        {
+            // Demarshal just to process new_id arg, or for debugging.  We could optimize this to
+            // only do the work needed to eventually call id_map.add for the new_id, but in most
+            // cases, a new_id bearing message will have very few other arguments (usually none), so
+            // the wasted work is minimal.  Best to keep the same code path:
+            let mut dmsg = DemarshalledMessage::new(header, msg_decl, in_msg);
+            dmsg.demarshal(in_fds, self);
+            self.debug_unified(header, msg_decl, &dmsg, from_server);
+            dmsg.relay_unmodified(out)?;
         } else {
             // No demarshalling needed - this path allows transfering data directly from the input
             // buffer to the output buffer with no intermediate copies, and should be the choice for
             // most of the message traffic
             let num_fds = msg_decl.num_fds as usize;
-            out.send_raw(in_fds.drain(0..num_fds), in_msg)?;
+            out.send_raw(in_fds.drain(num_fds), in_msg)?;
         }
+
         Ok(())
+    }
+}
+
+mod debug {
+    use super::{DemarshalledMessage, Mediator, Message, MessageHeader};
+
+    impl<'a> Mediator<'a> {
+        fn eprint_flow_unified(&self, from_server: bool) {
+            if from_server {
+                eprint!("server->waydapt->client[{}]", self.init_info.ucred.pid.as_raw_nonzero());
+            } else {
+                eprint!("client[{}]->waydapt->server", self.init_info.ucred.pid.as_raw_nonzero());
+            }
+        }
+
+        fn eprint_flow_in(&self, from_server: bool) {
+            if from_server {
+                eprint!("server->waydapt[{}]", self.init_info.ucred.pid.as_raw_nonzero());
+            } else {
+                eprint!("client[{}]->waydapt", self.init_info.ucred.pid.as_raw_nonzero());
+            }
+        }
+
+        fn eprint_flow_out(&self, from_server: bool) {
+            if from_server {
+                eprint!("waydapt->client[{}]", self.init_info.ucred.pid.as_raw_nonzero());
+            } else {
+                eprint!("waydapt[{}]->server", self.init_info.ucred.pid.as_raw_nonzero());
+            }
+        }
+
+        pub(super) fn debug_in(
+            &self, header: MessageHeader, msg_decl: &Message, dmsg: &DemarshalledMessage,
+            from_server: bool,
+        ) {
+            if match self.init_info.options.debug_level {
+                1 => true,
+                2 => !from_server,
+                3 => from_server,
+                _ => false,
+            } {
+                debug_print(
+                    header,
+                    msg_decl,
+                    || self.eprint_flow_in(from_server),
+                    || dmsg.debug_print(self),
+                );
+            }
+        }
+
+        pub(super) fn debug_out(
+            &self, header: MessageHeader, msg_decl: &Message, dmsg: &DemarshalledMessage,
+            from_server: bool,
+        ) {
+            if match self.init_info.options.debug_level {
+                1 => true,
+                2 => from_server,
+                3 => !from_server,
+                _ => false,
+            } {
+                debug_print(
+                    header,
+                    msg_decl,
+                    || self.eprint_flow_out(from_server),
+                    || dmsg.debug_print(self),
+                );
+            }
+        }
+
+        #[inline]
+        pub(super) fn debug_unified(
+            &self, header: MessageHeader, msg_decl: &Message, dmsg: &DemarshalledMessage,
+            from_server: bool,
+        ) {
+            if self.init_info.options.debug_level != 0 {
+                debug_print(
+                    header,
+                    msg_decl,
+                    || self.eprint_flow_unified(from_server),
+                    || dmsg.debug_print(self),
+                );
+            }
+        }
+
+        pub(super) fn debug_drop(
+            &self, header: MessageHeader, msg_decl: &Message, from_server: bool,
+        ) {
+            if self.init_info.options.debug_level != 0 {
+                debug_print(
+                    header,
+                    msg_decl,
+                    || self.eprint_flow_out(from_server),
+                    || eprint!("dropped!"),
+                );
+            }
+        }
+    }
+
+    fn debug_print<F1, F2>(header: MessageHeader, msg_decl: &Message, flow: F1, body: F2)
+    where
+        F1: FnOnce(),
+        F2: FnOnce(),
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let microsecs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
+        let interface_name = &msg_decl.owner.get().unwrap().name;
+        let message_name = &msg_decl.name;
+        let target_id = header.object_id;
+        eprint!("[{:7}.{:03}] ", microsecs / 1000, microsecs % 1000);
+        flow();
+        eprint!("{interface_name}#{target_id}.{message_name}(");
+        body();
+        eprintln!(")");
     }
 }
 

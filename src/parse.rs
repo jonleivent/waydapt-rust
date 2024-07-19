@@ -3,6 +3,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
+use crate::crate_traits::Alloc;
 use std::{
     io::{BufRead, BufReader, Read},
     str::FromStr,
@@ -13,14 +14,12 @@ use quick_xml::{
     Reader,
 };
 
-use bumpalo::Bump;
-
-pub fn parse<S: Read>(stream: S, bump: &Bump) -> &Protocol {
+pub(crate) fn parse<S: Read>(stream: S, alloc: &impl Alloc) -> &Protocol {
     let mut reader = Reader::from_reader(BufReader::new(stream));
     reader.trim_text(true).expand_empty_elements(true);
     // Skip first <?xml ... ?> event
     let _ = reader.read_event_into(&mut Vec::new());
-    parse_protocol(reader, bump)
+    parse_protocol(reader, alloc)
 }
 
 fn decode_utf8_or_panic(txt: Vec<u8>) -> String {
@@ -41,8 +40,9 @@ fn parse_or_panic<T: FromStr>(txt: &[u8]) -> T {
     )
 }
 
-fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
-    let protocol = match reader.read_event_into(&mut Vec::new()) {
+fn parse_protocol<R: BufRead>(mut reader: Reader<R>, alloc: &impl Alloc) -> &Protocol {
+    let mut buf = Vec::new();
+    let protocol = match reader.read_event_into(&mut buf) {
         Ok(Event::Start(bytes)) => {
             assert!(bytes.name().into_inner() == b"protocol", "Missing protocol toplevel tag");
             if let Some(attr) = bytes
@@ -50,7 +50,7 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
                 .filter_map(Result::ok)
                 .find(|attr| attr.key.into_inner() == b"name")
             {
-                bump.alloc(Protocol::new(decode_utf8_or_panic(attr.value.into_owned())))
+                alloc.alloc(Protocol::new(decode_utf8_or_panic(attr.value.into_owned())))
             } else {
                 panic!("Protocol must have a name");
             }
@@ -59,10 +59,10 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
     };
 
     loop {
-        match reader.read_event_into(&mut Vec::new()) {
+        match reader.read_event_into(&mut buf) {
             Ok(Event::Start(bytes)) => {
                 if let b"interface" = bytes.name().into_inner() {
-                    let interface = parse_interface(&mut reader, bytes.attributes(), bump);
+                    let interface = parse_interface(&mut reader, bytes.attributes(), alloc);
                     protocol.interfaces.push(interface);
                 }
             }
@@ -83,9 +83,9 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, bump: &Bump) -> &Protocol {
 }
 
 fn parse_interface<'a, R: BufRead>(
-    reader: &mut Reader<R>, attrs: Attributes, bump: &'a Bump,
+    reader: &mut Reader<R>, attrs: Attributes, alloc: &'a impl Alloc,
 ) -> &'a Interface<'a> {
-    let interface = bump.alloc(Interface::new());
+    let interface = alloc.alloc(Interface::new());
     for attr in attrs.filter_map(Result::ok) {
         match attr.key.into_inner() {
             b"name" => interface.name = decode_utf8_or_panic(attr.value.into_owned()),
@@ -94,8 +94,9 @@ fn parse_interface<'a, R: BufRead>(
         }
     }
 
+    let mut buf = Vec::new();
     loop {
-        match reader.read_event_into(&mut Vec::new()) {
+        match reader.read_event_into(&mut buf) {
             #[allow(clippy::cast_possible_truncation)]
             Ok(Event::Start(bytes)) => {
                 let event_or_request = bytes.name().into_inner();
@@ -106,7 +107,7 @@ fn parse_interface<'a, R: BufRead>(
                     bytes.attributes(),
                     event_or_request, // event or request
                     is_request,
-                    bump,
+                    alloc,
                 );
                 if is_request {
                     interface.requests.push(msg);
@@ -124,9 +125,9 @@ fn parse_interface<'a, R: BufRead>(
 
 fn parse_message<'a, R: BufRead>(
     reader: &mut Reader<R>, opcode: u32, attrs: Attributes, event_or_request: &[u8],
-    is_request: bool, bump: &'a Bump,
+    is_request: bool, alloc: &'a impl Alloc,
 ) -> &'a Message<'a> {
-    let message = bump.alloc(Message::new(opcode));
+    let message = alloc.alloc(Message::new(opcode));
     message.is_request = is_request;
     for attr in attrs.filter_map(Result::ok) {
         match attr.key.into_inner() {
@@ -137,8 +138,9 @@ fn parse_message<'a, R: BufRead>(
     }
 
     let mut num_fds = 0;
+    let mut buf = Vec::new();
     loop {
-        match reader.read_event_into(&mut Vec::new()) {
+        match reader.read_event_into(&mut buf) {
             Ok(Event::Start(bytes)) if bytes.name().into_inner() == b"arg" => {
                 let arg = parse_arg(reader, bytes.attributes());
                 if arg.typ == Type::Fd {

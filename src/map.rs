@@ -26,8 +26,6 @@ impl<P: Peer> Debug for WaylandObjectMap<P> {
     }
 }
 
-// TBD: switch to using the Peer enum instead of a bool generic param.
-
 impl<P: Peer> WaylandObjectMap<P> {
     pub(crate) fn new() -> Self {
         Self { vect: Vec::new(), _pd: PhantomData }

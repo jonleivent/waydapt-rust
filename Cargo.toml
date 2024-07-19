@@ -12,6 +12,7 @@ dlopen2 = "0.7.0"
 getopts = "0.2.21"
 libc = "0.2.155"
 quick-xml = "0.31.0"
+smallvec = "1.13.2"
 static_assertions = "1.1.0"
 
 

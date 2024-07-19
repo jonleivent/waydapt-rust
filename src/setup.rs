@@ -15,37 +15,29 @@ use std::time::Duration;
 #[derive(Debug)]
 pub(crate) struct WaydaptOptions {
     pub(crate) fork_sessions: bool,
-    pub(crate) display_name: PathBuf,
-    pub(crate) terminate: Option<Duration>,
+    pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
-    pub(crate) server_socket_path: PathBuf,
 }
 
 impl WaydaptOptions {
     fn new(matches: &Matches) -> &'static Self {
         let wo = Box::leak(Box::new(WaydaptOptions {
             fork_sessions: matches.opt_present("c"),
-            display_name: matches.opt_str("d").unwrap_or("waydapt-0".to_string()).into(),
-            terminate: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
+            terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
-            debug_level: if let Ok(d) = std::env::var("WAYLAND_DEBUG") {
-                if d == "1" {
-                    1
-                } else if d == "client" {
-                    2
-                } else if d == "server" {
-                    3
-                } else {
-                    0
-                }
-            } else {
-                0
+            debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
+                Ok("1") => 1,
+                Ok("client") => 2,
+                Ok("server") => 3,
+                _ => 0,
             },
-            server_socket_path: crate::listener::get_server_socket_path(),
         }));
 
-        assert!(!(wo.terminate.is_some() && wo.fork_sessions), "-t and -c cannot be used together");
+        assert!(
+            !(wo.terminate_after.is_some() && wo.fork_sessions),
+            "-t and -c cannot be used together"
+        );
         wo
     }
 }
@@ -64,6 +56,75 @@ fn protocol_file_iter<'a>(
     }))
 }
 
+fn globals_and_handlers(
+    matches: &Matches, all_args: &mut Args,
+) -> (&'static ActiveInterfaces, &'static SessionHandlers) {
+    let protocol_files = matches.opt_strs("p");
+    let protocol_dirs = matches.opt_strs("P");
+    // This iterator produces all protocol files, individuals first, then dirs.  It assumes that
+    // an individual file is always a protocol file even if it does not have the .xml extension,
+    // but it filters directory content for only files that have the .xml extension:
+    let all_protocol_files = protocol_file_iter(&protocol_files, &protocol_dirs);
+
+    let globals_filename =
+        matches.opt_str("g").expect("-g required globals file option is missing");
+    let active_interfaces = active_interfaces(all_protocol_files, &globals_filename);
+
+    // TBD: should we pass active_interfaces to each init_handler so it can examine which interfaces
+    // and messages are active?  If not, then it might be the case that an init_handler tries to add
+    // a handler to an inactive message.  We could even have the init_handler search through
+    // interfaces and messages to see what it needs to do.  Alternatively, we could have add_handler
+    // return a Result that says if the interface is missing or inactive, or the message is missing
+    // or inactive.
+    let all_handlers = get_all_handlers(all_args);
+
+    link_message_handlers(all_handlers, active_interfaces);
+
+    // Dump the protocol and hanlder info if asked:
+    if let Some(protocol_output_filename) = matches.opt_str("o") {
+        use std::{fs::File, io::BufWriter};
+        let mut out = BufWriter::new(File::create(protocol_output_filename).unwrap());
+        active_interfaces.dump(&mut out).unwrap();
+    }
+
+    (active_interfaces, &all_handlers.session_handlers)
+}
+
+fn start_listening(matches: &Matches) -> SocketListener {
+    use rustix::fs::{flock, FlockOperation};
+    let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
+    let listener = SocketListener::new(display_name);
+
+    // Now that the socket is ready, we can use either or both of two ways to notify/allow clients
+    // to request sessions: unlock the anti-lock fd and daemonizing this process.  Daemonizing is
+    // the easiest, but it requires that the startup scripts be set up with clients run right after
+    // the waydapt in the same script.  The anti-lock fd can be used to coordinate startup in more
+    // complex environments, such as when the waydapt starts in its own sandbox (where daeminizing
+    // won't help vs. processes outside, unless the sandbox wrapper itself is smart enough to
+    // daemonize when its child does).
+
+    // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
+    if let Some(anti_lock_fd) = matches.opt_str("a") {
+        let raw = anti_lock_fd.parse().expect("-a fd : must be an int");
+        let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+        // check that the fd is really something we own:
+        assert!(
+            rustix::fs::fstat(&owned).is_ok(),
+            "Anti-lock (-a) fd={raw} does not correspond to an open file or dir"
+        );
+        flock(owned, FlockOperation::Unlock).unwrap();
+    };
+
+    // If we've been told to daemonize, do so to allow subsequent clients to start that were waiting
+    // for this process to exit:
+    if matches.opt_present("z") {
+        unsafe { daemonize() }.unwrap();
+        rustix::process::setsid().unwrap();
+    }
+
+    listener
+}
+
 fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
     // add handlers based on what's left in all_args iterator
     // the handlers are compiled in statically in Rust - but how do we introspect to find them?
@@ -77,16 +138,15 @@ fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
     // what we have is instead of a vector, a map (hashmap) from names (strings) to init
     // handlers - and we traverse it based on the remainder of all_args.
 
+    let handler_map = get_init_handlers();
+
     let all_handlers: &'static mut AllHandlers = Box::leak(Box::default());
-
-    let handler_map: std::collections::HashMap<String, InitHandlersFun> = get_init_handlers();
-
-    // the remainder of all_args will be name args -- name args -- ...., so we need to break it
-    // up into portions using take_while.
-
+    all_handlers.mod_name = "<builtin>";
     crate::input_handler::add_builtin_handlers(all_handlers);
 
-    // Call init handlers for modules in the order that their names appear on the command line:
+    // Call init handlers for modules in the order that their names appear on the command line.  The
+    // remainder of all_args will be name args -- name args -- ...., so we need to break it up into
+    // portions using take_while.
     loop {
         let Some(handler_mod_name) = all_args.next() else { break };
         let Some(handler_init) = handler_map.get(&handler_mod_name) else {
@@ -94,15 +154,14 @@ fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
         };
         // this init handler gets the next sequence of args up to the next --
         let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
+        all_handlers.mod_name = Box::leak(Box::new(handler_mod_name)).as_str();
         handler_init(&handler_args, all_handlers);
     }
     all_handlers
 }
 
-// Could we instead provide an impl for AddHandler that directly sets active_interfaces?  No we
-// can't because we're using OnceLocks, which can only be modified once.
 fn link_message_handlers(all_handlers: &mut AllHandlers, active_interfaces: &ActiveInterfaces) {
-    // Link the message handlers to their messages:
+    // Set the Message.handlers fields
     for (interface_name, interface_handlers) in &mut all_handlers.message_handlers {
         if let Some(interface) = active_interfaces.maybe_get_interface(interface_name) {
             for (name, request_handlers) in interface_handlers.request_handlers.drain() {
@@ -119,28 +178,19 @@ fn link_message_handlers(all_handlers: &mut AllHandlers, active_interfaces: &Act
     }
 }
 
-fn own_anti_lock_fd(raw: i32) -> OwnedFd {
-    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-    // check that the fd is really something we own:
-    assert!(
-        rustix::fs::fstat(&owned).is_ok(),
-        "Anti-lock (-a) fd={raw} does not correspond to an open file or dir"
-    );
-    // It would be nice if we could confirm that the file is locked, but how?  Maybe we find
-    // out only when we try to unlock it?
-    owned
-}
-
 #[derive(Default, Debug)]
 struct InterfaceHandlers {
-    request_handlers: HashMap<&'static str, VecDeque<MessageHandler>>,
-    event_handlers: HashMap<&'static str, VecDeque<MessageHandler>>,
+    request_handlers: HashMap<&'static str, VecDeque<(&'static str, MessageHandler)>>,
+    event_handlers: HashMap<&'static str, VecDeque<(&'static str, MessageHandler)>>,
 }
+
+type SessionHandlers = VecDeque<SessionInitHandler>;
 
 #[derive(Default, Debug)]
 struct AllHandlers {
     message_handlers: HashMap<&'static str, InterfaceHandlers>,
-    session_handlers: VecDeque<SessionInitHandler>,
+    session_handlers: SessionHandlers,
+    mod_name: &'static str,
 }
 
 impl AddHandler for AllHandlers {
@@ -154,7 +204,7 @@ impl AddHandler for AllHandlers {
             .request_handlers
             .entry(request_name)
             .or_default()
-            .push_front(handler);
+            .push_front((self.mod_name, handler));
     }
     fn request_push_back(
         &mut self, interface_name: &'static str, request_name: &'static str,
@@ -166,7 +216,7 @@ impl AddHandler for AllHandlers {
             .request_handlers
             .entry(request_name)
             .or_default()
-            .push_back(handler);
+            .push_back((self.mod_name, handler));
     }
     fn event_push_front(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
@@ -177,7 +227,7 @@ impl AddHandler for AllHandlers {
             .event_handlers
             .entry(event_name)
             .or_default()
-            .push_front(handler);
+            .push_front((self.mod_name, handler));
     }
     fn event_push_back(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
@@ -188,7 +238,7 @@ impl AddHandler for AllHandlers {
             .event_handlers
             .entry(event_name)
             .or_default()
-            .push_back(handler);
+            .push_back((self.mod_name, handler));
     }
     fn session_push_front(&mut self, handler: SessionInitHandler) {
         self.session_handlers.push_front(handler);
@@ -248,77 +298,25 @@ pub(crate) fn startup() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // gather options that are used elsewhere:
-    let waydapt_options = WaydaptOptions::new(&matches);
+    // gather options that can be used elsewhere:
+    let options = WaydaptOptions::new(&matches);
 
-    // options that are used here:
-    let anti_lock_raw_fd =
-        matches.opt_str("a").map(|s| s.parse::<i32>().expect("-a fd : must be an int"));
-    let globals_filename =
-        matches.opt_str("g").expect("-g required globals file option is missing");
-    let protocol_output_filename = matches.opt_str("o");
-    let protocol_files = matches.opt_strs("p");
-    let protocol_dirs = matches.opt_strs("P");
-    let daemonize_when_socket_ready = matches.opt_present("z");
+    // do all protocol and globals parsing, and handler linkups:
+    let (active_interfaces, session_handlers) = globals_and_handlers(&matches, all_args);
 
-    let anti_lock_fd = anti_lock_raw_fd.map(own_anti_lock_fd);
+    // Start listening on the socket for our clients:
+    let listener = start_listening(&matches);
 
-    // This iterator produces all protocol files, individuals first, then dirs.  It assumes that
-    // an individual file is always a protocol file even if it does not have the .xml extension,
-    // but it filters directory content for only files that have the .xml extension:
-    let all_protocol_files = protocol_file_iter(&protocol_files, &protocol_dirs);
-
-    ////////////////////////////////////////////////////////////////////////////////
-
-    let active_interfaces = active_interfaces(all_protocol_files, &globals_filename);
-
-    // TBD: should we pass active_interfaces to each init_handler so it can examine which interfaces
-    // and messages are active?  If not, then it might be the case that an init_handler tries to add
-    // a handler to an inactive message.  We could even have the init_handler search through
-    // interfaces and messages to see what it needs to do.
-    let all_handlers = get_all_handlers(all_args);
-
-    link_message_handlers(all_handlers, active_interfaces);
-
-    // Dump the protocol and hanlder info if asked:
-    if let Some(protocol_output_filename) = protocol_output_filename {
-        todo!();
-        // output the protocol.
-    }
-
-    // Prepare the socket for our clients:
-    let listener = SocketListener::new(&waydapt_options.display_name);
-
-    // Now that the socket is ready, we can use either or both of the two signalling mechanisms
-    // to allow clients to request sessions:
-
-    // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
-    if let Some(owned) = anti_lock_fd {
-        use rustix::fs::{flock, FlockOperation};
-        flock(owned, FlockOperation::Unlock).unwrap();
-    }
-
-    // If we've been told to daemonize, do so to allow subsequent clients to start that waiting
-    // for this process to exit:
-    if daemonize_when_socket_ready {
-        unsafe { daemonize() }.unwrap();
-        rustix::process::setsid().unwrap();
-    }
-
-    let session_handlers = &all_handlers.session_handlers;
-
-    let accept = || {
-        accept_clients(listener, waydapt_options, active_interfaces, session_handlers);
-    };
+    let accept = || accept_clients(listener, options, active_interfaces, session_handlers);
     // If we're going to fork client sessions, then we don't need any special multi-threaded
     // exit magic (to enable other threads to end the process in an orderly fashion, with
     // destructors).  Otherwise, we do:
-    if waydapt_options.fork_sessions {
+    if options.fork_sessions {
         accept(); // accept_clients in this thread
         ExitCode::SUCCESS
     } else {
-        std::thread::spawn(accept); // accept_clients in second thread
-
+        // accept clients in second thread, so that this main thread can wait:
+        std::thread::spawn(accept);
         // Wait for any thread to report a problem, or exit due to the terminate option:
         multithread_exit_handler()
     }
@@ -326,26 +324,20 @@ pub(crate) fn startup() -> ExitCode {
 
 fn accept_clients(
     listener: SocketListener, options: &'static WaydaptOptions,
-    active_interfaces: &'static ActiveInterfaces,
-    session_handlers: &'static VecDeque<SessionInitHandler>,
+    interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
 ) {
     let fork_sessions = options.fork_sessions;
     for client_stream in listener.incoming() {
-        let client_session = {
-            match client_stream {
-                Ok(client_stream) => move || {
-                    client_session(options, active_interfaces, session_handlers, client_stream);
-                },
-                Err(e) => {
-                    eprintln!("Client listener error: {e:?}");
-                    if !fork_sessions {
-                        // we are in thread 2, so panicking here does no good
-                        multithread_exit(ExitCode::FAILURE);
-                    }
-                    panic!();
-                }
+        let Ok(client_stream) = client_stream else {
+            eprintln!("Client listener error: {client_stream:?}");
+            if !fork_sessions {
+                // we are in thread 2, so panicking here does no good.  Instead, tell the main
+                // thread to exit, and panic if that doesn't work:
+                multithread_exit(ExitCode::FAILURE);
             }
+            panic!();
         };
+        let session = move || client_session(options, interfaces, handlers, &client_stream);
 
         if fork_sessions {
             // we are in the main thread (because fork_sessions), so unwrap works:
@@ -353,13 +345,20 @@ fn accept_clients(
             // We need to drop the listener (but not remove_file at the corresponding paths)
             // because as the child, we have no need for them, but they won't drop on their own:
             listener.drop_without_removes();
-            return client_session();
+            return session();
         }
         // dropping the returned JoinHandle detaches the thread, which is what we want
-        std::thread::spawn(client_session);
+        std::thread::spawn(session);
     }
 }
 
 fn get_init_handlers() -> HashMap<String, InitHandlersFun> {
+    // We need a way to find all init handlers somehow.  One way would be a build script that finds
+    // them, generates another file with a single function we know the name of to produce the above
+    // hash map, and we call that here.  For example, right now we have
+    // input_handler::safeclip::init_handler.
+
+    //Alternatively, we require that main.rs is edited in some obvious way to add an init handler.
+
     todo!()
 }

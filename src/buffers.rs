@@ -4,8 +4,9 @@
 #![forbid(clippy::large_stack_frames)]
 
 use crate::basics::{to_u8_slice_mut, uninit_array, MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
-use crate::crate_traits::{InStream, MessageSender, OutStream};
+use crate::crate_traits::Messenger;
 use crate::header::{get_msg_length, MessageHeader};
+use crate::streams::{recv_msg, send_msg, IOStream};
 use arrayvec::ArrayVec;
 use rustix::fd::BorrowedFd;
 use std::collections::{LinkedList, VecDeque};
@@ -13,22 +14,23 @@ use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
 
 #[derive(Debug)]
-pub(crate) struct InBuffer {
+pub(crate) struct InBuffer<'a> {
     data: [u32; MAX_WORDS_OUT * 2],
     front: usize,
     back: usize,
     fds: VecDeque<OwnedFd>,
+    stream: &'a IOStream,
 }
 
-impl Default for InBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InBuffer {
-    pub(crate) fn new() -> Self {
-        Self { data: uninit_array(), front: 0, back: 0, fds: VecDeque::with_capacity(MAX_FDS_OUT) }
+impl<'a> InBuffer<'a> {
+    pub(crate) fn new(stream: &'a IOStream) -> Self {
+        Self {
+            data: uninit_array(),
+            front: 0,
+            back: 0,
+            fds: VecDeque::with_capacity(MAX_FDS_OUT),
+            stream,
+        }
     }
 
     // pop a single message from the buffer, based on the length in its header, if it is all there
@@ -48,10 +50,7 @@ impl InBuffer {
         Some((msg, &mut self.fds))
     }
 
-    pub(crate) fn receive<S>(&mut self, stream: &'_ S) -> IoResult<usize>
-    where
-        S: InStream,
-    {
+    pub(crate) fn receive(&mut self) -> IoResult<usize> {
         self.compact();
         debug_assert!(self.back <= MAX_WORDS_OUT);
         // if we have more than MAX_WORDS_OUT available storage, should we allow receive to use it?
@@ -63,7 +62,7 @@ impl InBuffer {
         // will be starved of fds.  So we have to limit the message input to MAX_WORDS_OUT.
         let buf = &mut self.data[self.back..(MAX_WORDS_OUT + self.back)];
         debug_assert_eq!(buf.len(), MAX_WORDS_OUT);
-        let amount_read = stream.receive(buf, &mut self.fds)?;
+        let amount_read = recv_msg(self.stream, buf, &mut self.fds)?;
         self.back += amount_read;
         debug_assert!(self.back <= self.data.len());
         Ok(amount_read)
@@ -103,12 +102,12 @@ type Chunks = LinkedList<Chunk>;
 //type Chunks = VecDeque<Box<Chunk>>;
 
 #[derive(Debug)]
-pub(crate) struct OutBuffer<S: OutStream> {
+pub(crate) struct OutBuffer<'a> {
     chunks: Chunks,
     free_chunks: Chunks,
     fds: VecDeque<OwnedFd>,
     pub(crate) flush_every_send: bool,
-    stream: S,
+    stream: &'a IOStream,
 }
 
 fn initial_chunks() -> Chunks {
@@ -121,8 +120,8 @@ fn initial_chunks() -> Chunks {
 
 const LIMIT_SENDS_TO_MAX_WORDS_OUT: bool = false;
 
-impl<S: OutStream> OutBuffer<S> {
-    pub(crate) fn new(stream: S) -> Self {
+impl<'a> OutBuffer<'a> {
+    pub(crate) fn new(stream: &'a IOStream) -> Self {
         #![allow(clippy::default_trait_access)]
         Self {
             // chunks must never be empty:
@@ -136,10 +135,6 @@ impl<S: OutStream> OutBuffer<S> {
             flush_every_send: false,
             stream,
         }
-    }
-
-    pub(crate) fn get_stream(&self) -> &S {
-        &self.stream
     }
 
     fn start_next_chunk(&mut self) {
@@ -216,7 +211,7 @@ impl<S: OutStream> OutBuffer<S> {
         let (nwords_flushed, nfds_flushed) = {
             let bfds: ArrayVec<BorrowedFd, MAX_FDS_OUT> =
                 self.fds.iter().take(MAX_FDS_OUT).map(OwnedFd::as_fd).collect();
-            (self.stream.send(first_chunk, &bfds)?, bfds.len())
+            (send_msg(self.stream, first_chunk, &bfds)?, bfds.len())
         };
         debug_assert!(nwords_flushed > 0 || nfds_flushed == 0);
         // if amount_flushed == 0, then not even the fds were flushed
@@ -262,7 +257,7 @@ impl<S: OutStream> OutBuffer<S> {
     }
 }
 
-impl<S: OutStream> MessageSender for OutBuffer<S> {
+impl<'a> Messenger for OutBuffer<'a> {
     // Allow a closure (msgfun) to marshal the message into this OutBuffer using an ExtendChunk for
     // each arg of th message, and returning the MessageSender for us to fix up (fix the size field)
     // and marshal.

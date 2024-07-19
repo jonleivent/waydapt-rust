@@ -6,6 +6,11 @@ use crate::buffers::ExtendChunk;
 use crate::header::MessageHeader;
 use crate::map::WL_SERVER_ID_START;
 
+pub(crate) trait Alloc {
+    #[allow(clippy::mut_from_ref)]
+    fn alloc<T>(&self, it: T) -> &mut T;
+}
+
 pub(crate) trait Peer {
     const IS_SERVER: bool;
 
@@ -34,23 +39,13 @@ impl Peer for ServerPeer {
     }
 }
 
-pub(crate) trait InStream {
-    fn receive<T>(&self, buf: &mut [T], fds: &mut impl Extend<OwnedFd>) -> IoResult<usize>
-    where
-        T: AllBitValuesSafe;
-}
-
-pub(crate) trait OutStream {
-    fn send<T>(&self, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>
-    where
-        T: AllBitValuesSafe;
-}
-
 pub(crate) trait FdInput {
     fn try_take_fd(&mut self) -> Option<OwnedFd>;
+
+    fn drain(&mut self, num: usize) -> impl Iterator<Item = OwnedFd>;
 }
 
-pub(crate) trait MessageSender {
+pub(crate) trait Messenger {
     fn send(
         &mut self, fds: impl IntoIterator<Item = OwnedFd>,
         msgfun: impl FnOnce(ExtendChunk) -> MessageHeader,
@@ -59,15 +54,6 @@ pub(crate) trait MessageSender {
     fn send_raw(
         &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u32],
     ) -> IoResult<usize>;
-}
-
-pub(crate) trait Messenger {
-    type FI: FdInput;
-    type MO: MessageSender;
-
-    fn handle(
-        &mut self, from: usize, in_msg: &[u32], in_fds: &mut Self::FI, out: &mut Self::MO,
-    ) -> IoResult<()>;
 }
 
 pub(crate) trait EventHandler {
@@ -89,4 +75,5 @@ pub(crate) trait EventHandler {
 
 // ImplAsBytes should only be implemented for types that are implemented as bytes without
 // translation, and without any possible unsafe bit values - such as the primitive numeric types
+#[allow(clippy::missing_safety_doc)]
 pub(crate) unsafe trait AllBitValuesSafe {}
