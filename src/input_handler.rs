@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 #![forbid(unsafe_code)]
 
+use crate::basics::round4;
 use crate::buffers::OutBuffer;
 use crate::crate_traits::{ClientPeer, FdInput, Messenger, ServerPeer};
 #[allow(clippy::enum_glob_use)]
@@ -13,7 +14,7 @@ use crate::header::MessageHeader;
 use crate::map::{WaylandObjectMap, WL_SERVER_ID_START};
 use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
-use crate::protocol::Message;
+use crate::protocol::{Message, Type};
 use crate::session::WaydaptSessionInitInfo;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -144,26 +145,42 @@ impl<'a> Mediator<'a> {
             }
             self.debug_out(header, msg_decl, &dmsg, from_server);
             dmsg.marshal(out)?;
-        } else if msg_decl.new_id_interface.get().is_some()
-            || self.init_info.options.debug_level != 0
-        {
-            // Demarshal just to process new_id arg, or for debugging.  We could optimize this to
-            // only do the work needed to eventually call id_map.add for the new_id, but in most
-            // cases, a new_id bearing message will have very few other arguments (usually none), so
-            // the wasted work is minimal.  Best to keep the same code path:
+        } else if self.init_info.options.debug_level == 0 {
+            // Fast track, no demarshalling, although maybe just a little parsing to find the new_id
+            // value if it is present:
+            if let Some(interface) = msg_decl.new_id_interface.get() {
+                let id = Self::find_new_id(msg_decl, in_msg);
+                self.add(id, interface);
+            } else {
+                // We can't use new_idInterface or find_new_id on wl_registry::bind, but we
+                // shouldn't need to, because it always has a builtin handler, hence will be handled
+                // in the top part of this if.
+                debug_assert!(!msg_decl.is_wl_registry_bind());
+            }
+            out.send_raw(in_fds.drain(msg_decl.num_fds as usize), in_msg)?;
+        } else {
+            // Demarshal just for debug output (and new_id, if present):
             let mut dmsg = DemarshalledMessage::new(header, msg_decl, in_msg);
             dmsg.demarshal(in_fds, self);
             self.debug_unified(header, msg_decl, &dmsg, from_server);
             dmsg.relay_unmodified(out)?;
-        } else {
-            // No demarshalling needed - this path allows transfering data directly from the input
-            // buffer to the output buffer with no intermediate copies, and should be the choice for
-            // most of the message traffic
-            let num_fds = msg_decl.num_fds as usize;
-            out.send_raw(in_fds.drain(num_fds), in_msg)?;
         }
 
         Ok(())
+    }
+
+    fn find_new_id(msg_decl: &Message, data: &[u32]) -> u32 {
+        // The new_id arg is most often the first arg, so this is usually fast
+        let mut i = 2; // bypass 2 header words
+        for arg in msg_decl.get_args() {
+            i += match arg.typ {
+                Type::NewId => return data[i],
+                Type::Int | Type::Uint | Type::Fixed | Type::Object => 1,
+                Type::String | Type::Array => round4(data[i] as usize) / 4 + 1,
+                Type::Fd => 0,
+            };
+        }
+        panic!("No new_id arg found when one was expected for {msg_decl:?}")
     }
 }
 
@@ -332,7 +349,7 @@ pub(crate) fn add_builtin_handlers(adder: &mut dyn AddHandler) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-mod safeclip {
+pub(crate) mod safeclip {
     use std::ffi::CString;
 
     use super::{
@@ -341,7 +358,7 @@ mod safeclip {
 
     static PREFIX: OnceLock<CString> = OnceLock::new();
 
-    fn init_handler(args: &[String], adder: &mut dyn AddHandler) {
+    pub(crate) fn init_handler(args: &[String], adder: &mut dyn AddHandler) {
         // we expect exactly one arg, which is the prefix.  Unlike the C waydapt, the 0th arg is NOT
         // the dll name, it is our first arg.
         assert_eq!(args.len(), 1);

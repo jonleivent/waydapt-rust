@@ -30,10 +30,6 @@ pub enum ArgData<'a> {
     Fd { index: usize },
 }
 
-// What if args was just a vec of u16 offsets from the front of the msg?  We can then register
-// changes in a separate field.  The fds would still be in their own field, and the fd offsets would
-// be indexes into that instead.
-
 type InlineVec<T> = SmallVec<[T; 2]>;
 
 pub(crate) struct DemarshalledMessage<'a> {
@@ -331,6 +327,7 @@ impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
     fn set_arg(&mut self, index: usize, a: ArgData<'a>) {
         use std::mem::discriminant as discr;
         let sa = &mut self.args[index];
+        // don't allow the discriminant of the arg to be changed, only its data
         assert_eq!(discr(sa), discr(&a), "{sa:?} vs. {a:?} mismatch");
         self.maybe_modified = true;
         *sa = a;

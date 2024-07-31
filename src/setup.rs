@@ -42,10 +42,11 @@ impl WaydaptOptions {
     }
 }
 
+// Construct a single iterator over all protocol files and protocol directories
 fn protocol_file_iter<'a>(
     files: &'a [String], dirs: &'a [String],
 ) -> impl Iterator<Item = PathBuf> + 'a {
-    files.iter().map(std::path::PathBuf::from).chain(dirs.iter().flat_map(|d| {
+    files.iter().map(PathBuf::from).chain(dirs.iter().flat_map(|d| {
         std::fs::read_dir(d).unwrap().filter_map(|f| {
             let f = f.unwrap().path();
             match f.extension() {
@@ -57,7 +58,7 @@ fn protocol_file_iter<'a>(
 }
 
 fn globals_and_handlers(
-    matches: &Matches, all_args: &mut Args,
+    matches: &Matches, all_args: &mut Args, init_handlers: &[(&str, InitHandlersFun)],
 ) -> (&'static ActiveInterfaces, &'static SessionHandlers) {
     let protocol_files = matches.opt_strs("p");
     let protocol_dirs = matches.opt_strs("P");
@@ -76,7 +77,7 @@ fn globals_and_handlers(
     // interfaces and messages to see what it needs to do.  Alternatively, we could have add_handler
     // return a Result that says if the interface is missing or inactive, or the message is missing
     // or inactive.
-    let all_handlers = get_all_handlers(all_args);
+    let all_handlers = get_all_handlers(all_args, init_handlers, active_interfaces);
 
     link_message_handlers(all_handlers, active_interfaces);
 
@@ -125,7 +126,10 @@ fn start_listening(matches: &Matches) -> SocketListener {
     listener
 }
 
-fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
+fn get_all_handlers(
+    all_args: &mut Args, init_handlers: &[(&str, InitHandlersFun)],
+    active_interfaces: &'static ActiveInterfaces,
+) -> &'static mut AllHandlers {
     // add handlers based on what's left in all_args iterator
     // the handlers are compiled in statically in Rust - but how do we introspect to find them?
     // We could use a build script to search among the files for particularly named functions in modules.
@@ -138,9 +142,8 @@ fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
     // what we have is instead of a vector, a map (hashmap) from names (strings) to init
     // handlers - and we traverse it based on the remainder of all_args.
 
-    let handler_map = get_init_handlers();
-
-    let all_handlers: &'static mut AllHandlers = Box::leak(Box::default());
+    let all_handlers: &'static mut AllHandlers =
+        Box::leak(Box::new(AllHandlers::new(active_interfaces)));
     all_handlers.mod_name = "<builtin>";
     crate::input_handler::add_builtin_handlers(all_handlers);
 
@@ -149,7 +152,8 @@ fn get_all_handlers(all_args: &mut Args) -> &'static mut AllHandlers {
     // portions using take_while.
     loop {
         let Some(handler_mod_name) = all_args.next() else { break };
-        let Some(handler_init) = handler_map.get(&handler_mod_name) else {
+        let Some((_, handler_init)) = init_handlers.iter().find(|(n, _)| n == &handler_mod_name)
+        else {
             panic!("{handler_mod_name} does not have a handler init function");
         };
         // this init handler gets the next sequence of args up to the next --
@@ -186,11 +190,23 @@ struct InterfaceHandlers {
 
 type SessionHandlers = VecDeque<SessionInitHandler>;
 
-#[derive(Default, Debug)]
 struct AllHandlers {
     message_handlers: HashMap<&'static str, InterfaceHandlers>,
     session_handlers: SessionHandlers,
     mod_name: &'static str,
+    active_interfaces: &'static ActiveInterfaces,
+}
+
+impl AllHandlers {
+    fn new(active_interfaces: &'static ActiveInterfaces) -> Self {
+        #[allow(clippy::default_trait_access)]
+        Self {
+            message_handlers: Default::default(),
+            session_handlers: Default::default(),
+            mod_name: "",
+            active_interfaces,
+        }
+    }
 }
 
 impl AddHandler for AllHandlers {
@@ -285,7 +301,7 @@ fn get_options() -> Options {
     opts
 }
 
-pub(crate) fn startup() -> ExitCode {
+pub(crate) fn startup(init_handlers: &[(&str, InitHandlersFun)]) -> ExitCode {
     let all_args = &mut std::env::args();
     let program = all_args.next().unwrap();
     let our_args = all_args.take_while(|a| a != "--");
@@ -302,7 +318,8 @@ pub(crate) fn startup() -> ExitCode {
     let options = WaydaptOptions::new(&matches);
 
     // do all protocol and globals parsing, and handler linkups:
-    let (active_interfaces, session_handlers) = globals_and_handlers(&matches, all_args);
+    let (active_interfaces, session_handlers) =
+        globals_and_handlers(&matches, all_args, init_handlers);
 
     // Start listening on the socket for our clients:
     let listener = start_listening(&matches);
@@ -350,15 +367,4 @@ fn accept_clients(
         // dropping the returned JoinHandle detaches the thread, which is what we want
         std::thread::spawn(session);
     }
-}
-
-fn get_init_handlers() -> HashMap<String, InitHandlersFun> {
-    // We need a way to find all init handlers somehow.  One way would be a build script that finds
-    // them, generates another file with a single function we know the name of to produce the above
-    // hash map, and we call that here.  For example, right now we have
-    // input_handler::safeclip::init_handler.
-
-    //Alternatively, we require that main.rs is edited in some obvious way to add an init handler.
-
-    todo!()
 }

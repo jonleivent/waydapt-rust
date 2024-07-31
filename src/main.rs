@@ -18,6 +18,9 @@ pub mod setup;
 pub mod streams;
 pub mod terminator;
 
+type IHEntry = (&'static str, crate::for_handlers::InitHandlersFun);
+
 fn main() -> std::process::ExitCode {
-    crate::setup::startup()
+    let ihtable: &[IHEntry] = &[("safeclip", crate::input_handler::safeclip::init_handler)];
+    crate::setup::startup(ihtable)
 }
