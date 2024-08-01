@@ -1,5 +1,7 @@
+pub mod addons;
 pub mod basics;
 pub mod buffers;
+pub mod builtin;
 pub mod crate_traits;
 pub mod event_loop;
 pub mod for_handlers;
@@ -21,6 +23,6 @@ pub mod terminator;
 type IHEntry = (&'static str, crate::for_handlers::InitHandlersFun);
 
 fn main() -> std::process::ExitCode {
-    let ihtable: &[IHEntry] = &[("safeclip", crate::input_handler::safeclip::init_handler)];
+    let ihtable: &[IHEntry] = &[("safeclip", crate::addons::safeclip::init_handler)];
     crate::setup::startup(ihtable)
 }

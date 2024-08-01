@@ -1,9 +1,12 @@
 #![warn(clippy::pedantic)]
-use crate::for_handlers::{AddHandler, InitHandlersFun, MessageHandler, SessionInitHandler};
+use crate::for_handlers::{
+    AddHandler, AddHandlerError, InitHandlersFun, MessageHandler, SessionInitHandler,
+};
 use crate::forking::{daemonize, double_fork, ForkResult};
 use crate::listener::SocketListener;
 use crate::multithread_exit::{multithread_exit, multithread_exit_handler, ExitCode};
 use crate::postparse::{active_interfaces, ActiveInterfaces};
+use crate::protocol::{Interface, Message};
 use crate::session::client_session;
 use getopts::{Matches, Options, ParsingStyle};
 use std::collections::{HashMap, VecDeque};
@@ -79,7 +82,7 @@ fn globals_and_handlers(
     // or inactive.
     let all_handlers = get_all_handlers(all_args, init_handlers, active_interfaces);
 
-    link_message_handlers(all_handlers, active_interfaces);
+    all_handlers.link_with_messages();
 
     // Dump the protocol and hanlder info if asked:
     if let Some(protocol_output_filename) = matches.opt_str("o") {
@@ -164,42 +167,29 @@ fn get_all_handlers(
     all_handlers
 }
 
-fn link_message_handlers(all_handlers: &mut AllHandlers, active_interfaces: &ActiveInterfaces) {
-    // Set the Message.handlers fields
-    for (interface_name, interface_handlers) in &mut all_handlers.message_handlers {
-        if let Some(interface) = active_interfaces.maybe_get_interface(interface_name) {
-            for (name, request_handlers) in interface_handlers.request_handlers.drain() {
-                if let Some(request) = interface.get_request_by_name(name) {
-                    request.handlers.set(request_handlers).expect("should only be set once");
-                }
-            }
-            for (name, event_handlers) in interface_handlers.event_handlers.drain() {
-                if let Some(event) = interface.get_event_by_name(name) {
-                    event.handlers.set(event_handlers).expect("should only be set once");
-                }
-            }
-        }
-    }
-}
+type RInterface = &'static Interface<'static>;
+type RMessage = &'static Message<'static>;
+
+type HandlerMap = HashMap<&'static str, (RMessage, VecDeque<(&'static str, MessageHandler)>)>;
 
 #[derive(Default, Debug)]
 struct InterfaceHandlers {
-    request_handlers: HashMap<&'static str, VecDeque<(&'static str, MessageHandler)>>,
-    event_handlers: HashMap<&'static str, VecDeque<(&'static str, MessageHandler)>>,
+    request_handlers: HandlerMap,
+    event_handlers: HandlerMap,
 }
 
 type SessionHandlers = VecDeque<SessionInitHandler>;
 
 struct AllHandlers {
-    message_handlers: HashMap<&'static str, InterfaceHandlers>,
+    message_handlers: HashMap<&'static str, (RInterface, InterfaceHandlers)>,
     session_handlers: SessionHandlers,
     mod_name: &'static str,
     active_interfaces: &'static ActiveInterfaces,
 }
 
 impl AllHandlers {
+    #![allow(clippy::default_trait_access)]
     fn new(active_interfaces: &'static ActiveInterfaces) -> Self {
-        #[allow(clippy::default_trait_access)]
         Self {
             message_handlers: Default::default(),
             session_handlers: Default::default(),
@@ -207,54 +197,93 @@ impl AllHandlers {
             active_interfaces,
         }
     }
+
+    fn link_with_messages(&mut self) {
+        // Set the Message.handlers fields
+        for (_, (_interface, mut interface_handlers)) in self.message_handlers.drain() {
+            for (_, (request, request_handlers)) in interface_handlers.request_handlers.drain() {
+                request.handlers.set(request_handlers).expect("should only be set once");
+            }
+            for (_, (event, event_handlers)) in interface_handlers.event_handlers.drain() {
+                event.handlers.set(event_handlers).expect("should only be set once");
+            }
+        }
+    }
+
+    fn get_handlers<const IS_REQUEST: bool>(
+        &mut self, interface_name: &'static str, msg_name: &'static str,
+    ) -> Result<&mut VecDeque<(&'static str, MessageHandler)>, AddHandlerError> {
+        use std::collections::hash_map::Entry;
+        let entry = self.message_handlers.entry(interface_name);
+        let (interface, ih) = match entry {
+            Entry::Vacant(ve) => {
+                if let Some(interface) = self.active_interfaces.maybe_get_interface(interface_name)
+                {
+                    ve.insert((interface, Default::default()))
+                } else {
+                    return Err(AddHandlerError::NoSuchInterface);
+                }
+            }
+            Entry::Occupied(oe) => oe.into_mut(),
+        };
+        let entry = if IS_REQUEST {
+            ih.request_handlers.entry(msg_name)
+        } else {
+            ih.event_handlers.entry(msg_name)
+        };
+        let (_message, msg_handlers) = match entry {
+            Entry::Vacant(ve) => {
+                let (maybe_message, err) = if IS_REQUEST {
+                    (interface.get_request_by_name(msg_name), AddHandlerError::NoSuchRequest)
+                } else {
+                    (interface.get_event_by_name(msg_name), AddHandlerError::NoSuchEvent)
+                };
+                if let Some(message) = maybe_message {
+                    ve.insert((message, Default::default()))
+                } else {
+                    return Err(err);
+                }
+            }
+            Entry::Occupied(oe) => oe.into_mut(),
+        };
+        Ok(msg_handlers)
+    }
 }
 
 impl AddHandler for AllHandlers {
     fn request_push_front(
         &mut self, interface_name: &'static str, request_name: &'static str,
         handler: MessageHandler,
-    ) {
-        self.message_handlers
-            .entry(interface_name)
-            .or_default()
-            .request_handlers
-            .entry(request_name)
-            .or_default()
-            .push_front((self.mod_name, handler));
+    ) -> Result<(), AddHandlerError> {
+        let mod_name = self.mod_name;
+        let handlers = self.get_handlers::<true>(interface_name, request_name)?;
+        handlers.push_front((mod_name, handler));
+        Ok(())
     }
     fn request_push_back(
         &mut self, interface_name: &'static str, request_name: &'static str,
         handler: MessageHandler,
-    ) {
-        self.message_handlers
-            .entry(interface_name)
-            .or_default()
-            .request_handlers
-            .entry(request_name)
-            .or_default()
-            .push_back((self.mod_name, handler));
+    ) -> Result<(), AddHandlerError> {
+        let mod_name = self.mod_name;
+        let handlers = self.get_handlers::<true>(interface_name, request_name)?;
+        handlers.push_back((mod_name, handler));
+        Ok(())
     }
     fn event_push_front(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
-    ) {
-        self.message_handlers
-            .entry(interface_name)
-            .or_default()
-            .event_handlers
-            .entry(event_name)
-            .or_default()
-            .push_front((self.mod_name, handler));
+    ) -> Result<(), AddHandlerError> {
+        let mod_name = self.mod_name;
+        let handlers = self.get_handlers::<false>(interface_name, event_name)?;
+        handlers.push_front((mod_name, handler));
+        Ok(())
     }
     fn event_push_back(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
-    ) {
-        self.message_handlers
-            .entry(interface_name)
-            .or_default()
-            .event_handlers
-            .entry(event_name)
-            .or_default()
-            .push_back((self.mod_name, handler));
+    ) -> Result<(), AddHandlerError> {
+        let mod_name = self.mod_name;
+        let handlers = self.get_handlers::<false>(interface_name, event_name)?;
+        handlers.push_back((mod_name, handler));
+        Ok(())
     }
     fn session_push_front(&mut self, handler: SessionInitHandler) {
         self.session_handlers.push_front(handler);

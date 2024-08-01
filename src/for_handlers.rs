@@ -39,22 +39,30 @@ pub type MessageHandler = fn(&mut dyn MessageInfo, &mut dyn SessionInfo) -> Mess
 
 pub type SessionInitHandler = fn(&dyn SessionInitInfo);
 
+#[derive(Debug)]
+pub enum AddHandlerError {
+    NoSuchInterface,
+    NoSuchRequest,
+    NoSuchEvent,
+}
+
 pub trait AddHandler {
+    #![allow(clippy::missing_errors_doc)]
     fn request_push_front(
         &mut self, interface_name: &'static str, request_name: &'static str,
         handler: MessageHandler,
-    );
+    ) -> Result<(), AddHandlerError>;
     fn request_push_back(
         &mut self, interface_name: &'static str, request_name: &'static str,
         handler: MessageHandler,
-    );
+    ) -> Result<(), AddHandlerError>;
 
     fn event_push_front(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
-    );
+    ) -> Result<(), AddHandlerError>;
     fn event_push_back(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
-    );
+    ) -> Result<(), AddHandlerError>;
 
     fn session_push_front(&mut self, handler: SessionInitHandler);
     fn session_push_back(&mut self, handler: SessionInitHandler);
