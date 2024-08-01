@@ -148,7 +148,7 @@ fn get_all_handlers(
     let all_handlers: &'static mut AllHandlers =
         Box::leak(Box::new(AllHandlers::new(active_interfaces)));
     all_handlers.mod_name = "<builtin>";
-    crate::input_handler::add_builtin_handlers(all_handlers);
+    crate::builtin::add_builtin_handlers(all_handlers);
 
     // Call init handlers for modules in the order that their names appear on the command line.  The
     // remainder of all_args will be name args -- name args -- ...., so we need to break it up into
