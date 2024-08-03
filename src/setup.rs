@@ -139,11 +139,6 @@ fn get_all_handlers(
     // https://doc.rust-lang.org/cargo/reference/build-scripts.html
     //
     // can build scripts operate across multiple crates?  Or do they each need their own?
-    //
-    // For now, we should just pretend that somehow we have a vector of init_handlers to call.
-    // But how are they sorted, and how do they correspond to the remainder of all_args?  Maybe
-    // what we have is instead of a vector, a map (hashmap) from names (strings) to init
-    // handlers - and we traverse it based on the remainder of all_args.
 
     let all_handlers: &'static mut AllHandlers =
         Box::leak(Box::new(AllHandlers::new(active_interfaces)));

@@ -147,6 +147,15 @@ impl<'a> Interface<'a> {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug)]
+pub(crate) enum SpecialMessage {
+    WlRegistryGlobal,
+    WlRegistryBind,
+    WlDisplaySync,
+    WlDisplayDeleteId,
+}
+
 #[derive(Debug)]
 pub struct Message<'a> {
     pub name: String,
@@ -159,6 +168,7 @@ pub struct Message<'a> {
     pub(crate) handlers: OnceLock<VecDeque<(&'static str, MessageHandler)>>, // str is module name
     pub num_fds: u32,
     pub is_request: bool,
+    pub(crate) special: OnceLock<SpecialMessage>,
 }
 
 impl<'a> Message<'a> {
@@ -174,6 +184,7 @@ impl<'a> Message<'a> {
             handlers: OnceLock::new(),
             num_fds: 0,
             is_request: false,
+            special: OnceLock::new(),
         }
     }
 
@@ -191,6 +202,27 @@ impl<'a> Message<'a> {
 
     pub fn get_new_id_interface(&self) -> Option<&Interface<'a>> {
         self.new_id_interface.get().copied()
+    }
+    #[inline]
+    pub(crate) fn is_wl_registry_bind(&self) -> bool {
+        matches!(self.special.get(), Some(SpecialMessage::WlRegistryBind))
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn is_wl_registry_global(&self) -> bool {
+        matches!(self.special.get(), Some(SpecialMessage::WlRegistryGlobal))
+    }
+
+    #[inline]
+    pub(crate) fn is_wl_display_sync(&self) -> bool {
+        matches!(self.special.get(), Some(SpecialMessage::WlDisplaySync))
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn is_wl_display_delete_id(&self) -> bool {
+        matches!(self.special.get(), Some(SpecialMessage::WlDisplayDeleteId))
     }
 
     pub(crate) fn dump(&self, out: &mut impl Write) -> IoResult<()> {

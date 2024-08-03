@@ -49,13 +49,7 @@ pub(crate) fn active_interfaces(
             let protocol = super::parse::parse(file, bump);
             if protocol.name == "wayland" {
                 assert!(maybe_display.is_none(), "Base wayland protocol seen twice");
-                maybe_display = protocol.find_interface("wl_display");
-                let display = maybe_display.expect("Missing interface wl_display");
-                // Because wl_callback violates the single-parent rule (it's the only interface that
-                // does), we have to set its parent here to wl_display so that it doesn't pick up a
-                // different parent later that is then rendered inactive by the global limits file.
-                let callback = protocol.find_interface("wl_callback").expect("Missing wl_callback");
-                callback.parent.set(display).expect("Should only be set here");
+                maybe_display = Some(fixup_wayland_get_display(protocol));
             }
             all_protocols.push(protocol);
         }
@@ -64,6 +58,35 @@ pub(crate) fn active_interfaces(
         assert!(display.is_active(), "wl_display is not active");
         bump.alloc(ActiveInterfacesA { map, display })
     })
+}
+
+fn fixup_wayland_get_display<'a>(wayland_protocol: &'a Protocol<'a>) -> &'a Interface<'a> {
+    // Mostly this is to mark the special messages in the wayland protocol, but it also needs to
+    // handle setting the parent of wl_callback - see note below.
+    assert_eq!(wayland_protocol.name, "wayland");
+    let registry =
+        wayland_protocol.find_interface("wl_registry").expect("Missing interface wl_registry");
+    let bind = registry.requests.first().expect("Interface wl_registry has no requests");
+    assert_eq!(bind.name, "bind");
+    bind.special.set(SpecialMessage::WlRegistryBind).unwrap();
+    let global = registry.events.first().expect("Interface wl_registry has no events");
+    assert_eq!(global.name, "global");
+    global.special.set(SpecialMessage::WlRegistryGlobal).unwrap();
+    let display =
+        wayland_protocol.find_interface("wl_display").expect("Missing interface wl_display");
+    let sync = display.requests.first().expect("Interface wl_display has no requests");
+    assert_eq!(sync.name, "sync");
+    sync.special.set(SpecialMessage::WlDisplaySync).unwrap();
+    let delete_id = display.events.first().expect("Interface wl_display has no events");
+    assert_eq!(delete_id.name, "delete_id");
+    delete_id.special.set(SpecialMessage::WlDisplayDeleteId).unwrap();
+    let callback =
+        wayland_protocol.find_interface("wl_callback").expect("Missing interface wl_callback");
+    // Because wl_callback violates the single-parent rule (it's the only interface that
+    // does), we have to set its parent here to wl_display so that it doesn't pick up a
+    // different parent later that is then rendered inactive by the global limits file.
+    callback.parent.set(display).expect("Should only be set here");
+    display
 }
 
 impl<'a> ActiveInterfacesA<'a> {
@@ -243,22 +266,6 @@ impl<'a> Interface<'a> {
 }
 
 impl<'a> Message<'a> {
-    pub(crate) fn is_wl_registry_bind(&self) -> bool {
-        let owning_interface = self.owner.get().expect("owning_interface should be set");
-        let owning_protocol = owning_interface.owner.get().expect("owning_protocol should be set");
-        self.name == "bind"
-            && owning_interface.name == "wl_registry"
-            && owning_protocol.name == "wayland"
-    }
-
-    pub(crate) fn is_wl_display_sync(&self) -> bool {
-        let owning_interface = self.owner.get().expect("owning_interface should be set");
-        let owning_protocol = owning_interface.owner.get().expect("owning_protocol should be set");
-        self.name == "sync"
-            && owning_interface.name == "wl_display"
-            && owning_protocol.name == "wayland"
-    }
-
     fn new_id_interface_name(&self) -> Option<&String> {
         let mut new_id_args = self.args.iter().filter(|a| a.typ == Type::NewId);
         let targetless_ok = |name| self.is_wl_registry_bind() && name == "id";
