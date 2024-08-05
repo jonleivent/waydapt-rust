@@ -17,7 +17,7 @@ use crate::{
 
 pub(crate) fn get_all_handlers(
     all_args: &mut Args, init_handlers: &IHMap, active_interfaces: &'static ActiveInterfaces,
-) -> &'static mut AllHandlers {
+) -> AllHandlers {
     // add handlers based on what's left in all_args iterator
     // the handlers are compiled in statically in Rust - but how do we introspect to find them?
     // We could use a build script to search among the files for particularly named functions in modules.
@@ -25,9 +25,9 @@ pub(crate) fn get_all_handlers(
     //
     // can build scripts operate across multiple crates?  Or do they each need their own?
 
-    let all_handlers: &'static mut AllHandlers = Leaker.alloc(AllHandlers::new(active_interfaces));
+    let mut all_handlers = AllHandlers::new(active_interfaces);
     all_handlers.mod_name = "<builtin>";
-    crate::builtin::add_builtin_handlers(all_handlers);
+    crate::builtin::add_builtin_handlers(&mut all_handlers);
 
     // Call init handlers for modules in the order that their names appear on the command line.  The
     // remainder of all_args will be name args -- name args -- ...., so we need to break it up into
@@ -41,8 +41,9 @@ pub(crate) fn get_all_handlers(
         // this init handler gets the next sequence of args up to the next --
         let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
         all_handlers.mod_name = handler_mod_name;
-        handler_init(&handler_args, all_handlers);
+        handler_init(&handler_args, &mut all_handlers);
     }
+    all_handlers.link_with_messages();
     all_handlers
 }
 
@@ -61,7 +62,7 @@ pub(crate) type SessionHandlers = VecDeque<SessionInitHandler>;
 
 pub(crate) struct AllHandlers {
     message_handlers: HashMap<&'static str, (RInterface, InterfaceHandlers)>,
-    pub(crate) session_handlers: SessionHandlers,
+    pub(crate) session_handlers: &'static mut SessionHandlers,
     mod_name: &'static str,
     active_interfaces: &'static ActiveInterfaces,
 }
@@ -71,13 +72,13 @@ impl AllHandlers {
     fn new(active_interfaces: &'static ActiveInterfaces) -> Self {
         Self {
             message_handlers: Default::default(),
-            session_handlers: Default::default(),
+            session_handlers: Leaker.alloc(Default::default()),
             mod_name: "",
             active_interfaces,
         }
     }
 
-    pub(crate) fn link_with_messages(&mut self) {
+    fn link_with_messages(&mut self) {
         // Set the Message.handlers fields
         for (_, (_interface, mut interface_handlers)) in self.message_handlers.drain() {
             for (_, (request, request_handlers)) in interface_handlers.request_handlers.drain() {
@@ -95,7 +96,7 @@ impl AllHandlers {
     ) -> Result<&mut VecDeque<(&'static str, MessageHandler)>, AddHandlerError> {
         use std::collections::hash_map::Entry;
         let entry = self.message_handlers.entry(interface_name);
-        let (interface, ih) = match entry {
+        let (interface, iface_handlers) = match entry {
             Entry::Vacant(ve) => {
                 if let Some(interface) = self.active_interfaces.maybe_get_interface(interface_name)
                 {
@@ -107,9 +108,9 @@ impl AllHandlers {
             Entry::Occupied(oe) => oe.into_mut(),
         };
         let entry = if IS_REQUEST {
-            ih.request_handlers.entry(msg_name)
+            iface_handlers.request_handlers.entry(msg_name)
         } else {
-            ih.event_handlers.entry(msg_name)
+            iface_handlers.event_handlers.entry(msg_name)
         };
         let (_message, msg_handlers) = match entry {
             Entry::Vacant(ve) => {

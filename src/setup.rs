@@ -82,17 +82,16 @@ fn globals_and_handlers(
     // return a Result that says if the interface is missing or inactive, or the message is missing
     // or inactive.
     let all_handlers = get_all_handlers(all_args, init_handlers, active_interfaces);
+    // TBD: we really only need the SessionHandlers from the above - so why return the rest?
 
-    all_handlers.link_with_messages();
-
-    // Dump the protocol and hanlder info if asked:
+    // Dump the protocol and handler info if asked:
     if let Some(protocol_output_filename) = matches.opt_str("o") {
         use std::{fs::File, io::BufWriter};
         let mut out = BufWriter::new(File::create(protocol_output_filename).unwrap());
         active_interfaces.dump(&mut out).unwrap();
     }
 
-    (active_interfaces, &all_handlers.session_handlers)
+    (active_interfaces, all_handlers.session_handlers)
 }
 
 fn start_listening(matches: &Matches) -> SocketListener {
