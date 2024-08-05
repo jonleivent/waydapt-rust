@@ -1,19 +1,33 @@
-pub(crate) mod safeclip {
-    use std::{borrow::Cow, ffi::CString, sync::OnceLock};
+#![forbid(unsafe_code)]
+#![warn(clippy::pedantic)]
+#[allow(clippy::wildcard_imports)]
+use crate::for_handlers::*;
+use std::collections::HashMap;
 
-    use crate::for_handlers::{
-        AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo,
+pub(crate) type IHMap = HashMap<&'static str, InitHandlersFun>;
+
+pub(crate) fn get_addon_handlers() -> IHMap {
+    HashMap::from([("safeclip", safeclip::INIT_HANDLER)])
+}
+
+pub(crate) mod safeclip {
+    use std::{
+        borrow::Cow,
+        ffi::{CStr, CString},
+        sync::OnceLock,
     };
 
-    static PREFIX: OnceLock<CString> = OnceLock::new();
+    use crate::for_handlers::{
+        AddHandler, ArgData, InitHandlersFun, MessageHandlerResult, MessageInfo, SessionInfo,
+    };
 
-    pub(crate) fn init_handler(args: &[String], adder: &mut dyn AddHandler) {
+    static PREFIX: OnceLock<Vec<u8>> = OnceLock::new();
+
+    fn init_handler(args: &[String], adder: &mut dyn AddHandler) {
         // we expect exactly one arg, which is the prefix.  Unlike the C waydapt, the 0th arg is NOT
         // the dll name, it is our first arg.
         assert_eq!(args.len(), 1);
-        let prefix = &args[0];
-        let cprefix = CString::new(prefix.clone()).unwrap();
-        PREFIX.set(cprefix).unwrap();
+        PREFIX.set(args[0].as_bytes().into()).unwrap();
         let requests = [
             ("wl_shell_surface", "set_title"),
             ("xdg_toplevel", "set_title"),
@@ -43,6 +57,8 @@ pub(crate) mod safeclip {
         // We do not need a session init handler, because there is no per-session state
     }
 
+    pub(crate) const INIT_HANDLER: InitHandlersFun = init_handler;
+
     // Ideally, we could have a per-thread (per-session) buffer for concatenating where the prefix
     // is already present, and which gets borrowed by the Cow in the ArgData, so that there are no
     // allocations or frees.  A very elaborate alternative would be to have an additional field with
@@ -61,7 +77,7 @@ pub(crate) mod safeclip {
         for i in 0..msg.get_num_args() {
             if let ArgData::String(s) = msg.get_arg(i) {
                 let prefix = PREFIX.get().unwrap();
-                let both = [prefix.to_bytes(), s.to_bytes()].concat();
+                let both = [prefix, s.to_bytes()].concat();
                 let cstring = CString::new(both).unwrap();
                 msg.set_arg(i, ArgData::String(cstring.into()));
                 return MessageHandlerResult::Next;
@@ -70,26 +86,27 @@ pub(crate) mod safeclip {
         panic!("Expected a string arg, didn't find one");
     }
 
-    fn prefixed(prefix: &[u8], s: &[u8]) -> bool {
+    fn prefixed(prefix: &[u8], s: &CStr) -> bool {
         let plen = prefix.len();
+        let s = s.to_bytes_with_nul();
         s.len() >= plen && prefix == &s[..plen]
     }
 
     fn remove_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and remove PREFIX from the front of it:
-        let prefix = PREFIX.get().unwrap().to_bytes();
+        let prefix = PREFIX.get().unwrap();
         let plen = prefix.len();
         for i in 0..msg.get_num_args() {
             match msg.get_arg_mut(i) {
                 // Almost all cases will be borrowed, which saves us a copy:
-                ArgData::String(Cow::Borrowed(s)) if prefixed(prefix, s.to_bytes()) => {
+                ArgData::String(Cow::Borrowed(s)) if prefixed(prefix, s) => {
                     *s = &s[plen..]; // O(1) move, no copy
                     return MessageHandlerResult::Next;
                 }
                 // Not worth optimizing this case - it would only happen if we have a previous handler
                 // modifying this same string arg:
-                ArgData::String(Cow::Owned(s)) if prefixed(prefix, s.to_bytes()) => {
-                    *s = CString::new(&s.to_bytes()[plen..]).unwrap(); // O(N) copy
+                ArgData::String(Cow::Owned(s)) if prefixed(prefix, s) => {
+                    *s = s[..][plen..].into(); // O(N) copy
                     return MessageHandlerResult::Next;
                 }
                 ArgData::String(_) => return MessageHandlerResult::Drop,

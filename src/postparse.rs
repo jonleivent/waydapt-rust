@@ -3,6 +3,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
+use crate::basics::LEAKER;
 use crate::crate_traits::Alloc;
 use bumpalo::Bump;
 use std::cmp::min;
@@ -28,25 +29,17 @@ impl Alloc for Bump {
     }
 }
 
-struct Leaker;
-
-impl Alloc for Leaker {
-    fn alloc<T>(&self, it: T) -> &mut T {
-        Box::leak(Box::new(it))
-    }
-}
-
 pub(crate) fn active_interfaces(
     protocol_filenames: impl IntoIterator<Item = PathBuf>, globals_filename: &str,
 ) -> &'static ActiveInterfaces {
     static ACTIVE_INTERFACES: OnceLock<&ActiveInterfaces> = OnceLock::new();
     ACTIVE_INTERFACES.get_or_init(|| {
-        let bump = Box::leak(Box::new(Bump::new()));
+        let alloc = LEAKER.alloc(Bump::new());
         let mut all_protocols: Vec<&'static Protocol<'static>> = Vec::new();
         let mut maybe_display = None; // wl_display must exist
         for protocol_filename in protocol_filenames {
             let file = File::open(protocol_filename).unwrap();
-            let protocol = super::parse::parse(file, bump);
+            let protocol = super::parse::parse(file, alloc);
             if protocol.name == "wayland" {
                 assert!(maybe_display.is_none(), "Base wayland protocol seen twice");
                 maybe_display = Some(fixup_wayland_get_display(protocol));
@@ -56,7 +49,7 @@ pub(crate) fn active_interfaces(
         let display = maybe_display.expect("Missing base wayland protocol");
         let map = postparse(&all_protocols, globals_filename);
         assert!(display.is_active(), "wl_display is not active");
-        bump.alloc(ActiveInterfacesA { map, display })
+        alloc.alloc(ActiveInterfacesA { map, display })
     })
 }
 
@@ -69,17 +62,21 @@ fn fixup_wayland_get_display<'a>(wayland_protocol: &'a Protocol<'a>) -> &'a Inte
     let bind = registry.requests.first().expect("Interface wl_registry has no requests");
     assert_eq!(bind.name, "bind");
     bind.special.set(SpecialMessage::WlRegistryBind).unwrap();
+
     let global = registry.events.first().expect("Interface wl_registry has no events");
     assert_eq!(global.name, "global");
     global.special.set(SpecialMessage::WlRegistryGlobal).unwrap();
+
     let display =
         wayland_protocol.find_interface("wl_display").expect("Missing interface wl_display");
     let sync = display.requests.first().expect("Interface wl_display has no requests");
     assert_eq!(sync.name, "sync");
     sync.special.set(SpecialMessage::WlDisplaySync).unwrap();
+
     let delete_id = display.events.first().expect("Interface wl_display has no events");
     assert_eq!(delete_id.name, "delete_id");
     delete_id.special.set(SpecialMessage::WlDisplayDeleteId).unwrap();
+
     let callback =
         wayland_protocol.find_interface("wl_callback").expect("Missing interface wl_callback");
     // Because wl_callback violates the single-parent rule (it's the only interface that

@@ -2,7 +2,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::inline_always)]
 
-use crate::crate_traits::AllBitValuesSafe;
+use crate::crate_traits::{AllBitValuesSafe, Alloc};
 
 pub(crate) const MAX_FDS_OUT: usize = 28;
 
@@ -14,6 +14,16 @@ pub(crate) const MAX_ARGS: usize = 20; // WL_CLOSURE_MAX_ARGS in wayland
 #[inline(always)]
 pub(crate) const fn round4(x: usize) -> usize {
     (x + 3) & !3
+}
+
+pub(crate) struct Leaker;
+
+pub(crate) const LEAKER: Leaker = Leaker;
+
+impl Alloc for Leaker {
+    fn alloc<T>(&self, it: T) -> &mut T {
+        Box::leak(Box::new(it))
+    }
 }
 
 #[inline(always)]
