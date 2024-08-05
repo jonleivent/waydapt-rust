@@ -10,7 +10,8 @@ pub(crate) const WL_SERVER_ID_START: u32 = 0xff00_0000;
 
 type RInterface = &'static Interface<'static>;
 
-pub(crate) enum ObjectEntry {
+#[derive(Clone, Copy, Debug)]
+pub enum ObjectEntry {
     Live(RInterface),
     Deleted(RInterface),
 }
@@ -29,6 +30,11 @@ impl<P: Peer> Debug for WaylandObjectMap<P> {
 impl<P: Peer> WaylandObjectMap<P> {
     pub(crate) fn new() -> Self {
         Self { vect: Vec::new(), _pd: PhantomData }
+    }
+
+    pub(crate) fn try_lookup(&self, id: u32) -> Option<ObjectEntry> {
+        let id = P::normalize_id(id);
+        self.vect.get(id).copied()
     }
 
     pub(crate) fn lookup(&self, id: u32) -> Option<RInterface> {

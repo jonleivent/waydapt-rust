@@ -4,7 +4,7 @@ use crate::basics::Leaker;
 use crate::crate_traits::Alloc;
 use crate::for_handlers::SessionInitHandler;
 use crate::forking::{daemonize, double_fork, ForkResult};
-use crate::handlers::{get_all_handlers, SessionHandlers};
+use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
 use crate::multithread_exit::{multithread_exit, multithread_exit_handler, ExitCode};
 use crate::postparse::{active_interfaces, ActiveInterfaces};
@@ -75,14 +75,7 @@ fn globals_and_handlers(
         matches.opt_str("g").expect("-g required globals file option is missing");
     let active_interfaces = active_interfaces(all_protocol_files, &globals_filename);
 
-    // TBD: should we pass active_interfaces to each init_handler so it can examine which interfaces
-    // and messages are active?  If not, then it might be the case that an init_handler tries to add
-    // a handler to an inactive message.  We could even have the init_handler search through
-    // interfaces and messages to see what it needs to do.  Alternatively, we could have add_handler
-    // return a Result that says if the interface is missing or inactive, or the message is missing
-    // or inactive.
-    let all_handlers = get_all_handlers(all_args, init_handlers, active_interfaces);
-    // TBD: we really only need the SessionHandlers from the above - so why return the rest?
+    let session_handlers = gather_handlers(all_args, init_handlers, active_interfaces);
 
     // Dump the protocol and handler info if asked:
     if let Some(protocol_output_filename) = matches.opt_str("o") {
@@ -91,7 +84,7 @@ fn globals_and_handlers(
         active_interfaces.dump(&mut out).unwrap();
     }
 
-    (active_interfaces, all_handlers.session_handlers)
+    (active_interfaces, session_handlers)
 }
 
 fn start_listening(matches: &Matches) -> SocketListener {

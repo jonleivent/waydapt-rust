@@ -15,36 +15,22 @@ use crate::{
     protocol::{Interface, Message},
 };
 
-pub(crate) fn get_all_handlers(
+pub(crate) fn gather_handlers(
     all_args: &mut Args, init_handlers: &IHMap, active_interfaces: &'static ActiveInterfaces,
-) -> AllHandlers {
-    // add handlers based on what's left in all_args iterator
-    // the handlers are compiled in statically in Rust - but how do we introspect to find them?
-    // We could use a build script to search among the files for particularly named functions in modules.
-    // https://doc.rust-lang.org/cargo/reference/build-scripts.html
-    //
-    // can build scripts operate across multiple crates?  Or do they each need their own?
-
+) -> &'static SessionHandlers {
     let mut all_handlers = AllHandlers::new(active_interfaces);
+
+    // add addon session and message handlers based on what's left in all_args iterator
+    all_handlers.add_addon_handlers(all_args, init_handlers);
+
+    // By adding the builtin handlers last, we give them the ability to prevent addon handlers (by
+    // using push_front and MessageHandlerResult::Send or Drop), or allow them (by using push_back
+    // or push_front and Next):
     all_handlers.mod_name = "<builtin>";
     crate::builtin::add_builtin_handlers(&mut all_handlers);
 
-    // Call init handlers for modules in the order that their names appear on the command line.  The
-    // remainder of all_args will be name args -- name args -- ...., so we need to break it up into
-    // portions using take_while.
-    loop {
-        let Some(handler_mod_name) = all_args.next() else { break };
-        let handler_mod_name = Leaker.alloc(handler_mod_name).as_str();
-        let Some(handler_init) = init_handlers.get(handler_mod_name) else {
-            panic!("{handler_mod_name} does not have a handler init function");
-        };
-        // this init handler gets the next sequence of args up to the next --
-        let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
-        all_handlers.mod_name = handler_mod_name;
-        handler_init(&handler_args, &mut all_handlers);
-    }
     all_handlers.link_with_messages();
-    all_handlers
+    all_handlers.session_handlers
 }
 
 type RInterface = &'static Interface<'static>;
@@ -60,9 +46,9 @@ struct InterfaceHandlers {
 
 pub(crate) type SessionHandlers = VecDeque<SessionInitHandler>;
 
-pub(crate) struct AllHandlers {
+struct AllHandlers {
     message_handlers: HashMap<&'static str, (RInterface, InterfaceHandlers)>,
-    pub(crate) session_handlers: &'static mut SessionHandlers,
+    session_handlers: &'static mut SessionHandlers,
     mod_name: &'static str,
     active_interfaces: &'static ActiveInterfaces,
 }
@@ -70,11 +56,29 @@ pub(crate) struct AllHandlers {
 impl AllHandlers {
     #![allow(clippy::default_trait_access)]
     fn new(active_interfaces: &'static ActiveInterfaces) -> Self {
+        // The session handlers have to be 'static because they are shared across sessions
         Self {
             message_handlers: Default::default(),
             session_handlers: Leaker.alloc(Default::default()),
             mod_name: "",
             active_interfaces,
+        }
+    }
+
+    fn add_addon_handlers(&mut self, all_args: &mut Args, init_handlers: &IHMap) {
+        // Call init handlers for addon modules in the order that their names appear on the command
+        // line so that they can add their addon handlers.  The remainder of all_args will be name
+        // args -- name args -- ...., so we need to break it up into portions using take_while.
+        loop {
+            let Some(handler_mod_name) = all_args.next() else { break };
+            let handler_mod_name = Leaker.alloc(handler_mod_name).as_str();
+            let Some(handler_init) = init_handlers.get(handler_mod_name) else {
+                panic!("{handler_mod_name} does not have a handler init function");
+            };
+            // this init handler gets the next sequence of args up to the next --
+            let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
+            self.mod_name = handler_mod_name;
+            handler_init(&handler_args, self);
         }
     }
 
