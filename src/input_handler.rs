@@ -80,11 +80,15 @@ pub(crate) struct Mediator<'a> {
 
 impl<'a> SessionInitInfo for Mediator<'a> {
     fn ucred(&self) -> rustix::net::UCred {
-        self.init_info.ucred
+        self.init_info.ucred()
     }
 
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
-        self.init_info.active_interfaces
+        self.init_info.get_active_interfaces()
+    }
+
+    fn get_display(&self) -> RInterface {
+        self.init_info.get_display()
     }
 }
 
@@ -110,7 +114,7 @@ impl<'a> Mediator<'a> {
     pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo) -> Self {
         let mut s = Self { id_map: IdMap::new(), init_info };
         // the id map always has the wl_display interface at id 1:
-        s.id_map.add(1, init_info.active_interfaces.get_display());
+        s.id_map.add(1, init_info.get_display());
         s
     }
 

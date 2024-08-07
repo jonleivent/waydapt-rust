@@ -1,7 +1,9 @@
 #![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+use crate::multithread_exit::{multithread_exit, ExitCode};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::{panicking, sleep};
 use std::time::Duration;
 
 // When a client session ends, and we are running in multi-threaded mode (sessions are threads,
@@ -20,29 +22,31 @@ use std::time::Duration;
 static CLIENT_SESSION_COUNT: AtomicU32 = AtomicU32::new(0);
 static CLIENT_SESSION_TOTAL: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) struct SessionTerminator(Duration); // the timeout
+pub(crate) struct SessionTerminator {
+    timeout: Duration,
+}
 
 impl SessionTerminator {
     pub(crate) fn new(terminate_after: Duration) -> Self {
         CLIENT_SESSION_COUNT.fetch_add(1, Ordering::Acquire);
         CLIENT_SESSION_TOTAL.fetch_add(1, Ordering::Relaxed);
-        Self(terminate_after)
+        Self { timeout: terminate_after }
     }
 }
 
 impl Drop for SessionTerminator {
     fn drop(&mut self) {
-        use crate::multithread_exit::{multithread_exit, ExitCode};
-        use std::thread::{panicking, sleep};
         // fetch_sub returns the value prior to the subtract, so test against 1 intstead of 0:
         if CLIENT_SESSION_COUNT.fetch_sub(1, Ordering::Release) == 1 {
+            // We are the last remaining session, but maybe there will be others before timeout...
             let saved_client_session_total = CLIENT_SESSION_TOTAL.load(Ordering::Relaxed);
             // All we care about is if CLIENT_SESSION_TOTAL got incremented while we were
             // sleeping, hence we can use Relaxed because we aren't trying to maintain the
             // order of these two loads with respect to anything except operations on
             // CLIENT_SESSION_TOTAL.
-            sleep(self.0);
+            sleep(self.timeout);
             if saved_client_session_total == CLIENT_SESSION_TOTAL.load(Ordering::Relaxed) {
+                // No new sessions since we decided above we were last, so exit.
                 let exit_code = if panicking() { ExitCode::FAILURE } else { ExitCode::SUCCESS };
                 multithread_exit(exit_code);
             }

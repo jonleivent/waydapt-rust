@@ -109,6 +109,11 @@ impl<'a> ActiveInterfacesA<'a> {
         self.display
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Interface<'a>> {
+        let i = self.map.values().copied();
+        i
+    }
+
     pub(crate) fn dump(&self, out: &mut impl Write) -> IoResult<()> {
         for interface in self.map.values() {
             interface.dump(out)?;

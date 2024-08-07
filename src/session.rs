@@ -6,6 +6,7 @@ use crate::crate_traits::EventHandler;
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
 use crate::input_handler::Mediator;
 use crate::postparse::ActiveInterfaces;
+use crate::protocol::Interface;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Error, Formatter};
@@ -86,7 +87,7 @@ impl<'a> EventHandler for Session<'a> {
 pub(crate) struct WaydaptSessionInitInfo {
     pub(crate) ucred: rustix::net::UCred,
     pub(crate) active_interfaces: &'static ActiveInterfaces,
-    pub(crate) options: &'static crate::setup::WaydaptOptions,
+    pub(crate) options: &'static crate::setup::SharedOptions,
 }
 
 impl Debug for WaydaptSessionInitInfo {
@@ -103,19 +104,29 @@ impl SessionInitInfo for WaydaptSessionInitInfo {
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
         self.active_interfaces
     }
+
+    fn get_display(&self) -> &'static Interface<'static> {
+        self.active_interfaces.get_display()
+    }
 }
 
 // For errors that should kill off the process even if in multithreaded mode, call
 // multithread_exit if options.fork_sessions is false (which indicates multithreaded mode).
 // Otherwise panic or quivalent (unwrap).  Everything in here should just panic:
 pub(crate) fn client_session(
-    options: &'static crate::setup::WaydaptOptions, active_interfaces: &'static ActiveInterfaces,
-    session_handlers: &VecDeque<SessionInitHandler>, client_stream: &UnixStream,
+    options: &'static crate::setup::SharedOptions, active_interfaces: &'static ActiveInterfaces,
+    session_handlers: &VecDeque<SessionInitHandler>, client_stream: UnixStream,
 ) {
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
 
     let server_socket_path = crate::listener::get_server_socket_path();
+
+    // This function will own both streams - so do the following trivial assignment for
+    // client_stream to avoid clippy complaint.  The reason is that it is difficult for Session to
+    // own the streams because it also needs references to those streams from its buffers, and
+    // owning something while also referencing it is not Rusty.
+    let client_stream = client_stream;
     // Consider a case where the wayland server's socket was deleted.  That should only prevent
     // future clients from connecting, it should not cause existing clients to exit.  So unwrap
     // instead of multithread_exit:
@@ -123,17 +134,18 @@ pub(crate) fn client_session(
 
     // When would get_socket_peercred ever fail, given that we know the arg is correct?
     // Probably never.  Does it matter then how we handle it?:
-    let ucred = get_socket_peercred(client_stream).unwrap();
+    let ucred = get_socket_peercred(&client_stream).unwrap();
     let init_info = WaydaptSessionInitInfo { ucred, active_interfaces, options };
 
     // options.terminate can only be Some(duration) if options.fork_sessions is false, meaning we
-    // are in multi-threaded mode:
+    // are in multi-threaded mode - use it to conditionally set up a SessionTerminator that will
+    // terminate the waydapt process after the last session ends plus the duration:
     #[forbid(let_underscore_drop)]
     let _st = options.terminate_after.map(SessionTerminator::new);
 
     session_handlers.iter().for_each(|h| h(&init_info));
 
-    let mut session = Session::new(&init_info, [client_stream, &server_stream]);
+    let mut session = Session::new(&init_info, [&client_stream, &server_stream]);
 
     crate::event_loop::event_loop(&mut session).unwrap();
 }

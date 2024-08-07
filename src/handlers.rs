@@ -15,6 +15,8 @@ use crate::{
     protocol::{Interface, Message},
 };
 
+pub(crate) type SessionHandlers = VecDeque<SessionInitHandler>;
+
 pub(crate) fn gather_handlers(
     all_args: &mut Args, init_handlers: &IHMap, active_interfaces: &'static ActiveInterfaces,
 ) -> &'static SessionHandlers {
@@ -44,8 +46,6 @@ struct InterfaceHandlers {
     event_handlers: HandlerMap,
 }
 
-pub(crate) type SessionHandlers = VecDeque<SessionInitHandler>;
-
 struct AllHandlers {
     message_handlers: HashMap<&'static str, (RInterface, InterfaceHandlers)>,
     session_handlers: &'static mut SessionHandlers,
@@ -69,6 +69,7 @@ impl AllHandlers {
         // Call init handlers for addon modules in the order that their names appear on the command
         // line so that they can add their addon handlers.  The remainder of all_args will be name
         // args -- name args -- ...., so we need to break it up into portions using take_while.
+        let active_interfaces = self.active_interfaces;
         loop {
             let Some(handler_mod_name) = all_args.next() else { break };
             let handler_mod_name = Leaker.alloc(handler_mod_name).as_str();
@@ -78,7 +79,7 @@ impl AllHandlers {
             // this init handler gets the next sequence of args up to the next --
             let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
             self.mod_name = handler_mod_name;
-            handler_init(&handler_args, self);
+            handler_init(&handler_args, self, active_interfaces);
         }
     }
 
@@ -94,7 +95,7 @@ impl AllHandlers {
         }
     }
 
-    // get the handler queuef for a specific interface/message by names
+    // get the handler queue for a specific interface/message by names
     fn get_handlers<const IS_REQUEST: bool>(
         &mut self, interface_name: &'static str, msg_name: &'static str,
     ) -> Result<&mut VecDeque<(&'static str, MessageHandler)>, AddHandlerError> {
@@ -118,15 +119,27 @@ impl AllHandlers {
         };
         let (_message, msg_handlers) = match entry {
             Entry::Vacant(ve) => {
-                let (maybe_message, err) = if IS_REQUEST {
-                    (interface.get_request_by_name(msg_name), AddHandlerError::NoSuchRequest)
+                let (maybe_message, inactive_err, no_such_err) = if IS_REQUEST {
+                    (
+                        interface.get_request_by_name(msg_name),
+                        AddHandlerError::InactiveRequest,
+                        AddHandlerError::NoSuchRequest,
+                    )
                 } else {
-                    (interface.get_event_by_name(msg_name), AddHandlerError::NoSuchEvent)
+                    (
+                        interface.get_event_by_name(msg_name),
+                        AddHandlerError::InactiveEvent,
+                        AddHandlerError::NoSuchEvent,
+                    )
                 };
                 if let Some(message) = maybe_message {
-                    ve.insert((message, Default::default()))
+                    if message.is_active() {
+                        ve.insert((message, Default::default()))
+                    } else {
+                        return Err(inactive_err);
+                    }
                 } else {
-                    return Err(err);
+                    return Err(no_such_err);
                 }
             }
             Entry::Occupied(oe) => oe.into_mut(),

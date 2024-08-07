@@ -1,36 +1,42 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 #[allow(clippy::wildcard_imports)]
-use crate::for_handlers::*;
+use crate::for_handlers::InitHandlersFun;
 use std::collections::HashMap;
 
 pub(crate) type IHMap = HashMap<&'static str, InitHandlersFun>;
 
+// For now, we require that all addons add an entry into the HashMap returned by get_addon_handlers.
+// At some point, maybe we will add a build script that searches for INIT_HANDLER in all addon
+// modules and populates this HashMap automatically.
 pub(crate) fn get_addon_handlers() -> IHMap {
     HashMap::from([("safeclip", safeclip::INIT_HANDLER)])
 }
 
-pub(crate) mod safeclip {
+mod safeclip {
     use std::{
         borrow::Cow,
         ffi::{CStr, CString},
         sync::OnceLock,
     };
 
-    use crate::for_handlers::{
-        AddHandler, ArgData, InitHandlersFun, MessageHandlerResult, MessageInfo, SessionInfo,
+    use crate::{
+        for_handlers::{
+            AddHandler, ArgData, InitHandlersFun, MessageHandlerResult, MessageInfo, SessionInfo,
+        },
+        postparse::ActiveInterfaces,
+        protocol::{Message, Type},
     };
 
     static PREFIX: OnceLock<Vec<u8>> = OnceLock::new();
 
-    fn init_handler(args: &[String], adder: &mut dyn AddHandler) {
-        // we expect exactly one arg, which is the prefix.  Unlike the C waydapt, the 0th arg is NOT
-        // the dll name, it is our first arg.
-        assert_eq!(args.len(), 1);
-        PREFIX.set(args[0].as_bytes().into()).unwrap();
-        let requests = [
-            ("wl_shell_surface", "set_title"),
-            ("xdg_toplevel", "set_title"),
+    #[inline]
+    fn has_mime_type(msg: &Message<'_>) -> bool {
+        msg.args.iter().any(|a| a.typ == Type::String && a.name == "mime_type")
+    }
+
+    fn check_known_mime_type_msgs(active_interfaces: &'static ActiveInterfaces) {
+        let mime_type_requests = [
             ("wl_data_offer", "accept"),
             ("wl_data_offer", "receive"),
             ("wl_data_source", "offer"),
@@ -39,10 +45,14 @@ pub(crate) mod safeclip {
             ("zwlr_data_control_source_v1", "offer"),
             ("zwlr_data_control_offer_v1", "receive"),
         ];
-        for (iname, mname) in requests {
-            adder.request_push_front(iname, mname, add_prefix).unwrap();
+        for (iname, rname) in mime_type_requests {
+            if let Some(interface) = active_interfaces.maybe_get_interface(iname) {
+                if let Some(request) = interface.get_request_by_name(rname) {
+                    assert!(has_mime_type(request), "{request:?} missing String mime_type arg");
+                }
+            }
         }
-        let events = [
+        let mime_type_events = [
             ("wl_data_offer", "offer"),
             ("wl_data_source", "target"),
             ("wl_data_source", "send"),
@@ -51,10 +61,47 @@ pub(crate) mod safeclip {
             ("zwlr_data_control_source_v1", "send"),
             ("zwlr_data_control_offer_v1", "offer"),
         ];
-        for (iname, mname) in events {
-            adder.event_push_front(iname, mname, remove_prefix).unwrap();
+        for (iname, ename) in mime_type_events {
+            if let Some(interface) = active_interfaces.maybe_get_interface(iname) {
+                if let Some(event) = interface.get_event_by_name(ename) {
+                    assert!(has_mime_type(event), "{event:?} missing String mime_type arg");
+                }
+            }
         }
+    }
+
+    fn init_handler(
+        args: &[String], adder: &mut dyn AddHandler, active_interfaces: &'static ActiveInterfaces,
+    ) {
+        // Unlike the C waydapt, the 0th arg is NOT the dll name, it is our first arg.
+        assert_eq!(args.len(), 1);
+        PREFIX.set(args[0].as_bytes().into()).unwrap();
+
         // We do not need a session init handler, because there is no per-session state
+
+        check_known_mime_type_msgs(active_interfaces);
+
+        for iface in active_interfaces.iter() {
+            let iname = &iface.name.as_str();
+            // Add the add_prefix handler to any request named "set_title" or any that has a "mime_type" arg
+            for &request in &iface.requests {
+                if !request.is_active() {
+                    continue;
+                };
+                if request.name == "set_title" || has_mime_type(request) {
+                    adder.request_push_front(iname, &request.name, add_prefix).unwrap();
+                }
+            }
+            // Add the remove_prefix handler to any event that has a "mime_type" arg
+            for &event in &iface.events {
+                if !event.is_active() {
+                    continue;
+                };
+                if has_mime_type(event) {
+                    adder.event_push_front(iname, &event.name, remove_prefix).unwrap();
+                }
+            }
+        }
     }
 
     pub(crate) const INIT_HANDLER: InitHandlersFun = init_handler;
@@ -74,16 +121,18 @@ pub(crate) mod safeclip {
     // two closure or funpointer fields.
     fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and add PREFIX to the front of it:
-        for i in 0..msg.get_num_args() {
+        let msg_decl = msg.get_decl();
+        for (i, arg) in msg_decl.args.iter().enumerate() {
             if let ArgData::String(s) = msg.get_arg(i) {
-                let prefix = PREFIX.get().unwrap();
-                let both = [prefix, s.to_bytes()].concat();
-                let cstring = CString::new(both).unwrap();
-                msg.set_arg(i, ArgData::String(cstring.into()));
-                return MessageHandlerResult::Next;
+                if arg.name == "mime_type" || arg.name == "title" {
+                    let fixed =
+                        CString::new([PREFIX.get().unwrap(), s.to_bytes()].concat()).unwrap();
+                    msg.set_arg(i, ArgData::String(fixed.into()));
+                    return MessageHandlerResult::Next;
+                }
             }
         }
-        panic!("Expected a string arg, didn't find one");
+        unreachable!("Didn't find string arg named 'mime_type' or 'title'");
     }
 
     fn prefixed(prefix: &[u8], s: &CStr) -> bool {
@@ -96,7 +145,11 @@ pub(crate) mod safeclip {
         // find the first String arg and remove PREFIX from the front of it:
         let prefix = PREFIX.get().unwrap();
         let plen = prefix.len();
-        for i in 0..msg.get_num_args() {
+        let msg_decl = msg.get_decl();
+        for (i, arg) in msg_decl.args.iter().enumerate() {
+            if arg.name != "mime_type" {
+                continue;
+            }
             match msg.get_arg_mut(i) {
                 // Almost all cases will be borrowed, which saves us a copy:
                 ArgData::String(Cow::Borrowed(s)) if prefixed(prefix, s) => {
@@ -113,6 +166,6 @@ pub(crate) mod safeclip {
                 _ => {}
             }
         }
-        panic!("Expected a string arg, didn't find one");
+        unreachable!("Didn't find string arg named 'mime_type'");
     }
 }

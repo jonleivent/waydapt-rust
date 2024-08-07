@@ -17,16 +17,56 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug)]
-pub(crate) struct WaydaptOptions {
+pub(crate) struct SharedOptions {
     pub(crate) fork_sessions: bool,
     pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
 }
 
-impl WaydaptOptions {
+pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
+    let all_args = &mut std::env::args();
+    let program = all_args.next().unwrap();
+    let our_args = all_args.take_while(|a| a != "--");
+    let opts = get_options();
+    let matches = opts.parse(our_args).unwrap();
+
+    if matches.opt_present("h") {
+        let brief = format!("Usage: {program} [options] -- ...dlls-and-their-options...");
+        print!("{}", opts.usage(&brief));
+        return ExitCode::SUCCESS;
+    }
+
+    // gather options that can be used elsewhere:
+    let options = SharedOptions::new(&matches);
+
+    // do all protocol and globals parsing, and handler linkups:
+    let (active_interfaces, session_handlers) =
+        globals_and_handlers(&matches, all_args, init_handlers);
+
+    // Start listening on the socket for our clients:
+    let listener = start_listening(&matches);
+
+    // How we accept new clients will be similar whether we fork sessions or not:
+    let accept = || accept_clients(listener, options, active_interfaces, session_handlers);
+
+    // If we're going to fork client sessions, then we don't need any special multi-threaded
+    // exit magic (to enable other threads to end the process in an orderly fashion, with
+    // destructors).  Otherwise, we do:
+    if options.fork_sessions {
+        accept(); // accept_clients in this thread
+        ExitCode::SUCCESS
+    } else {
+        // accept clients in second thread, so that this main thread can wait:
+        std::thread::spawn(accept);
+        // Wait for any thread to report a problem, or exit due to the terminate option:
+        multithread_exit_handler()
+    }
+}
+
+impl SharedOptions {
     fn new(matches: &Matches) -> &'static Self {
-        let wo = Leaker.alloc(WaydaptOptions {
+        let wo = Leaker.alloc(SharedOptions {
             fork_sessions: matches.opt_present("c"),
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
@@ -159,46 +199,8 @@ fn get_options() -> Options {
     opts
 }
 
-pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
-    let all_args = &mut std::env::args();
-    let program = all_args.next().unwrap();
-    let our_args = all_args.take_while(|a| a != "--");
-    let opts = get_options();
-    let matches = opts.parse(our_args).unwrap();
-
-    if matches.opt_present("h") {
-        let brief = format!("Usage: {program} [options] -- ...dlls-and-their-options...");
-        print!("{}", opts.usage(&brief));
-        return ExitCode::SUCCESS;
-    }
-
-    // gather options that can be used elsewhere:
-    let options = WaydaptOptions::new(&matches);
-
-    // do all protocol and globals parsing, and handler linkups:
-    let (active_interfaces, session_handlers) =
-        globals_and_handlers(&matches, all_args, init_handlers);
-
-    // Start listening on the socket for our clients:
-    let listener = start_listening(&matches);
-
-    let accept = || accept_clients(listener, options, active_interfaces, session_handlers);
-    // If we're going to fork client sessions, then we don't need any special multi-threaded
-    // exit magic (to enable other threads to end the process in an orderly fashion, with
-    // destructors).  Otherwise, we do:
-    if options.fork_sessions {
-        accept(); // accept_clients in this thread
-        ExitCode::SUCCESS
-    } else {
-        // accept clients in second thread, so that this main thread can wait:
-        std::thread::spawn(accept);
-        // Wait for any thread to report a problem, or exit due to the terminate option:
-        multithread_exit_handler()
-    }
-}
-
 fn accept_clients(
-    listener: SocketListener, options: &'static WaydaptOptions,
+    listener: SocketListener, options: &'static SharedOptions,
     interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
 ) {
     let fork_sessions = options.fork_sessions;
@@ -212,7 +214,7 @@ fn accept_clients(
             }
             panic!();
         };
-        let session = move || client_session(options, interfaces, handlers, &client_stream);
+        let session = move || client_session(options, interfaces, handlers, client_stream);
 
         if fork_sessions {
             // we are in the main thread (because fork_sessions), so unwrap failing will terminate

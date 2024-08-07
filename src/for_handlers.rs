@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
 pub use crate::message::ArgData;
@@ -18,6 +19,7 @@ pub trait SessionInitInfo {
     fn ucred(&self) -> rustix::net::UCred;
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces;
     // TBD: get method for active interfaces, etc.
+    fn get_display(&self) -> RInterface; // wl_display
 }
 
 pub type RInterface = &'static Interface<'static>;
@@ -44,6 +46,8 @@ pub enum AddHandlerError {
     NoSuchInterface,
     NoSuchRequest,
     NoSuchEvent,
+    InactiveRequest,
+    InactiveEvent,
 }
 
 pub trait AddHandler {
@@ -68,4 +72,4 @@ pub trait AddHandler {
     fn session_push_back(&mut self, handler: SessionInitHandler);
 }
 
-pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler);
+pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces);

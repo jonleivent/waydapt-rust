@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 use rustix::event::epoll::EventFlags;
 use std::io::Result as IoResult;
 use std::os::fd::{BorrowedFd, OwnedFd};

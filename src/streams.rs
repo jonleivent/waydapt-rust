@@ -1,5 +1,5 @@
 #![warn(clippy::pedantic)]
-//#![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
 
