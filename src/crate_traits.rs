@@ -19,6 +19,7 @@ pub(crate) trait Peer {
     fn normalize_id(id: u32) -> usize;
 }
 
+#[derive(Debug)]
 pub(crate) struct ClientPeer;
 
 impl Peer for ClientPeer {
@@ -30,6 +31,7 @@ impl Peer for ClientPeer {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ServerPeer;
 
 impl Peer for ServerPeer {

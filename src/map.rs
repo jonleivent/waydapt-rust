@@ -16,15 +16,10 @@ pub enum ObjectEntry {
     Deleted(RInterface),
 }
 
+#[derive(Debug)]
 pub(crate) struct WaylandObjectMap<P: Peer> {
     vect: Vec<ObjectEntry>,
     _pd: PhantomData<P>,
-}
-
-impl<P: Peer> Debug for WaylandObjectMap<P> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        f.write_str("WaylandObjectMap")
-    }
 }
 
 impl<P: Peer> WaylandObjectMap<P> {

@@ -40,7 +40,7 @@ type RMessage = &'static Message<'static>;
 
 type HandlerMap = HashMap<&'static str, (RMessage, VecDeque<(&'static str, MessageHandler)>)>;
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 struct InterfaceHandlers {
     request_handlers: HandlerMap,
     event_handlers: HandlerMap,
@@ -87,10 +87,14 @@ impl AllHandlers {
         // Set the Message.handlers fields
         for (_, (_interface, mut interface_handlers)) in self.message_handlers.drain() {
             for (_, (request, request_handlers)) in interface_handlers.request_handlers.drain() {
-                request.handlers.set(request_handlers).expect("should only be set once");
+                if request.handlers.set(request_handlers).is_err() {
+                    unreachable!("should only be set once");
+                }
             }
             for (_, (event, event_handlers)) in interface_handlers.event_handlers.drain() {
-                event.handlers.set(event_handlers).expect("should only be set once");
+                if event.handlers.set(event_handlers).is_err() {
+                    unreachable!("should only be set once");
+                }
             }
         }
     }

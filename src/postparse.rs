@@ -132,7 +132,7 @@ fn postparse<'a>(protocols: &AllProtocols<'a>, globals_filename: &str) -> Active
     // Second pass (well, not really a pass - the iteration is over lines in the globals file):
     // determine which protocols and global interfaces are active based on the globals file, which
     // also includes a version limit for each global.
-    get_globals_limits(&parentless, globals_filename);
+    get_globals_limits(&parentless, globals_filename, protocols);
 
     // Third pass: propagate version limits to non-globals in the same protocol according to the
     // rules in: https://wayland.freedesktop.org/docs/html/ch04.html#sect-Protocol-Versioning. This
@@ -182,7 +182,7 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
     (externals, parentless)
 }
 
-fn get_globals_limits(parentless: &InterfaceMap, filename: &str) {
+fn get_globals_limits(parentless: &InterfaceMap, filename: &str, protocols: &AllProtocols<'_>) {
     for (n, ref name, version_limit) in global_limits(filename) {
         match parentless.get(name.as_str()).map(Vec::as_slice) {
             Some([interface @ Interface { parsed_version, limited_version, .. }]) => {
@@ -195,9 +195,15 @@ fn get_globals_limits(parentless: &InterfaceMap, filename: &str) {
                 // each global interface, so don't panic:
                 let _ = interface.owning_protocol().active.set(());
             }
-            None => panic!("Interface {name} not found: global limits file {filename} line {n}"),
             Some([]) => panic!("empty vector element in parentless map"),
             Some(multiple) => panic!("Multiple globals with same name: {}", Foster(multiple)),
+            None => {
+                if protocols.iter().flat_map(|p| &p.interfaces).any(|i| &i.name == name) {
+                    panic!("Non-global interface {name} in global limits file {filename} line {n}");
+                } else {
+                    panic!("Interface {name} not found: global limits file {filename} line {n}")
+                }
+            }
         }
     }
 }

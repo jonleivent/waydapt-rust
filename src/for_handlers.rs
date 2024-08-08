@@ -37,9 +37,23 @@ pub enum MessageHandlerResult {
     Drop,
 }
 
+// TBD: these fn types could be made more general.  They need to be Sendable.  thread::spawn uses:
+// pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+// where
+//    F: FnOnce() -> T + Send + 'static,
+//    T: Send + 'static,
+// We need something like this but with Fn instead of FnOnce.  Probably &dyn as well.
+
 pub type MessageHandler = fn(&mut dyn MessageInfo, &mut dyn SessionInfo) -> MessageHandlerResult;
 
 pub type SessionInitHandler = fn(&dyn SessionInitInfo);
+
+// TBD: a more general callable type is Box<dyn FnMut(...) + Clone> that we clone into each session
+// as needed.  But why does it need state?  The MessageHandlers can't have state.  If we want each
+// addon to have per-session state, they need to use thread_local somehow to set that up.
+
+// It would make sense if SessionInitHandler was FnOnce + Clone, and if MessageHandler was FnMut +
+// Clone if we somehow arrange for each session to have its own copy.
 
 #[derive(Debug)]
 pub enum AddHandlerError {
@@ -71,5 +85,3 @@ pub trait AddHandler {
     fn session_push_front(&mut self, handler: SessionInitHandler);
     fn session_push_back(&mut self, handler: SessionInitHandler);
 }
-
-pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces);

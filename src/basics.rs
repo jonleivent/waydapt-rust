@@ -79,3 +79,27 @@ unsafe impl AllBitValuesSafe for i32 {}
 unsafe impl AllBitValuesSafe for i64 {}
 unsafe impl AllBitValuesSafe for i128 {}
 unsafe impl AllBitValuesSafe for isize {}
+
+// maybe use crate derive_more instead of this wrapper?:
+#[derive(Copy, Clone, PartialEq, Default)]
+#[repr(transparent)]
+pub struct NoDebug<T: ?Sized>(pub T);
+
+impl<T: ?Sized> std::fmt::Debug for NoDebug<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "<...>")
+    }
+}
+
+impl<T: ?Sized> std::ops::Deref for NoDebug<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: ?Sized> std::ops::DerefMut for NoDebug<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}

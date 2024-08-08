@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
-#[allow(clippy::wildcard_imports)]
-use crate::for_handlers::InitHandlersFun;
+use crate::{for_handlers::AddHandler, postparse::ActiveInterfaces};
 use std::collections::HashMap;
+
+pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces);
 
 pub(crate) type IHMap = HashMap<&'static str, InitHandlersFun>;
 
@@ -21,20 +22,21 @@ mod safeclip {
     };
 
     use crate::{
-        for_handlers::{
-            AddHandler, ArgData, InitHandlersFun, MessageHandlerResult, MessageInfo, SessionInfo,
-        },
+        for_handlers::{AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo},
         postparse::ActiveInterfaces,
         protocol::{Message, Type},
     };
 
+    use super::InitHandlersFun;
+
     static PREFIX: OnceLock<Vec<u8>> = OnceLock::new();
 
     #[inline]
-    fn has_mime_type(msg: &Message<'_>) -> bool {
+    fn has_mime_type_arg(msg: &Message<'_>) -> bool {
         msg.args.iter().any(|a| a.typ == Type::String && a.name == "mime_type")
     }
 
+    // Just to make sure the protocol files aren't altered so that these known cases no longer work:
     fn check_known_mime_type_msgs(active_interfaces: &'static ActiveInterfaces) {
         let mime_type_requests = [
             ("wl_data_offer", "accept"),
@@ -48,7 +50,7 @@ mod safeclip {
         for (iname, rname) in mime_type_requests {
             if let Some(interface) = active_interfaces.maybe_get_interface(iname) {
                 if let Some(request) = interface.get_request_by_name(rname) {
-                    assert!(has_mime_type(request), "{request:?} missing String mime_type arg");
+                    assert!(has_mime_type_arg(request), "{request} missing String mime_type arg");
                 }
             }
         }
@@ -64,7 +66,7 @@ mod safeclip {
         for (iname, ename) in mime_type_events {
             if let Some(interface) = active_interfaces.maybe_get_interface(iname) {
                 if let Some(event) = interface.get_event_by_name(ename) {
-                    assert!(has_mime_type(event), "{event:?} missing String mime_type arg");
+                    assert!(has_mime_type_arg(event), "{event} missing String mime_type arg");
                 }
             }
         }
@@ -83,21 +85,21 @@ mod safeclip {
 
         for iface in active_interfaces.iter() {
             let iname = &iface.name.as_str();
-            // Add the add_prefix handler to any request named "set_title" or any that has a "mime_type" arg
+            // Add the add_prefix handler to any request named "set_title" or any that has a mime_type arg
             for &request in &iface.requests {
                 if !request.is_active() {
                     continue;
                 };
-                if request.name == "set_title" || has_mime_type(request) {
+                if request.name == "set_title" || has_mime_type_arg(request) {
                     adder.request_push_front(iname, &request.name, add_prefix).unwrap();
                 }
             }
-            // Add the remove_prefix handler to any event that has a "mime_type" arg
+            // Add the remove_prefix handler to any event that has a mime_type arg
             for &event in &iface.events {
                 if !event.is_active() {
                     continue;
                 };
-                if has_mime_type(event) {
+                if has_mime_type_arg(event) {
                     adder.event_push_front(iname, &event.name, remove_prefix).unwrap();
                 }
             }

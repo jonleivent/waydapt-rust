@@ -11,9 +11,9 @@ fn wl_registry_global_handler(
     msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo,
 ) -> MessageHandlerResult {
     // arg0 is the "name" of the global instance, really a uint
-    let ArgData::String(interface_name) = msg.get_arg(1) else { panic!() };
+    let ArgData::String(interface_name) = msg.get_arg(1) else { unreachable!() };
     let interface_name = interface_name.to_str().unwrap();
-    let ArgData::Uint(advertised_version) = msg.get_arg(2) else { panic!() };
+    let ArgData::Uint(advertised_version) = msg.get_arg(2) else { unreachable!() };
     let active_interfaces = session_info.get_active_interfaces();
     let Some(global_interface) = active_interfaces.maybe_get_global(interface_name) else {
         return MessageHandlerResult::Drop;
@@ -34,7 +34,7 @@ fn wl_registry_global_handler(
 fn wl_display_delete_id_handler(
     msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo,
 ) -> MessageHandlerResult {
-    let ArgData::Object(id) = msg.get_arg(0) else { panic!() };
+    let ArgData::Object(id) = msg.get_arg(0) else { unreachable!() };
     // should we check if this is the wayland-idfix handshake initial message from the server?  If
     // it is, it has !0 as a server object id, which will never exist, so delete of it will do
     // nothing (it won't panic either).

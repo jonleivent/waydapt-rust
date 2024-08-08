@@ -81,7 +81,7 @@ fn file_still_at_path(file: &File, path: &PathBuf) -> bool {
     let file_meta = file.metadata().unwrap();
     match metadata(path) {
         Ok(disk_meta) => metadata_eq(&file_meta, &disk_meta),
-        Err(err) if err.kind() != ErrorKind::NotFound => panic!(),
+        Err(err) if err.kind() != ErrorKind::NotFound => panic!("{err:?}"),
         _ => false,
     }
 }

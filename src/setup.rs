@@ -168,16 +168,16 @@ fn get_options() -> Options {
     opts.optopt(
         "a",
         "antilock",
-        "anti lock file descriptor for syncing client startup with a ready socket",
+        "file descriptor for waydapt to unlock when its socket is ready",
         "FILE-DESCRIPTOR",
     );
-    opts.optflag("c", "childprocs", "child sessions are processes instead of threads");
+    opts.optflag("c", "childprocs", "make child sessions processes instead of threads");
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
-    opts.optflag("f", "flushsends", "flush every message send, instead of buffering them");
-    opts.reqopt(
+    opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
+    opts.optopt(
         "g",
         "globals",
-        "file one allowed global interface and max version per line",
+        "file with one allowed global interface and max version per line",
         "FILE",
     );
     opts.optflag("h", "help", "print this help");

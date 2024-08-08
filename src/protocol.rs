@@ -2,6 +2,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::missing_panics_doc)]
 
+use crate::basics::NoDebug;
 use crate::for_handlers::MessageHandler;
 use std::collections::VecDeque;
 use std::fmt;
@@ -45,6 +46,10 @@ pub struct Interface<'a> {
     pub(crate) owner: OnceLock<&'a Protocol<'a>>,
     pub(crate) parent: OnceLock<&'a Interface<'a>>,
 }
+
+// TBD: It is the case that, after postparse, the requests and events vectors should have all active
+// msgs before all inactive msgs.  But taking advantage of this fact would require making those
+// vectors have interior mutability so that we could truncate them.
 
 impl<'a> fmt::Display for Interface<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -165,7 +170,7 @@ pub struct Message<'a> {
     pub(crate) owner: OnceLock<&'a Interface<'a>>,
     pub(crate) new_id_interface: OnceLock<&'a Interface<'a>>,
     pub(crate) active: OnceLock<()>, // acts like an atomic bool that can only go from inactive -> active
-    pub(crate) handlers: OnceLock<VecDeque<(&'static str, MessageHandler)>>, // str is module name
+    pub(crate) handlers: NoDebug<OnceLock<VecDeque<(&'static str, MessageHandler)>>>, // str is module name
     pub num_fds: u32,
     pub is_request: bool,
     pub(crate) special: OnceLock<SpecialMessage>,
@@ -181,7 +186,7 @@ impl<'a> Message<'a> {
             owner: OnceLock::new(),
             new_id_interface: OnceLock::new(),
             active: OnceLock::new(),
-            handlers: OnceLock::new(),
+            handlers: NoDebug(OnceLock::new()),
             num_fds: 0,
             is_request: false,
             special: OnceLock::new(),
