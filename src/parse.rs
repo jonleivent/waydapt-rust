@@ -63,17 +63,13 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, alloc: &impl Alloc) -> &Pro
             Ok(Event::Start(bytes)) => {
                 if let b"interface" = bytes.name().into_inner() {
                     let interface = parse_interface(&mut reader, bytes.attributes(), alloc);
-                    protocol.interfaces.push(interface);
+                    protocol.interfaces.insert(&interface.name, interface);
                 }
             }
             Ok(Event::End(bytes)) => {
-                let name = bytes.name().into_inner();
-                assert!(
-                    name == b"protocol",
-                    "Unexpected closing token `{}`",
-                    String::from_utf8_lossy(name)
-                );
-                break;
+                if let b"protocol" = bytes.name().into_inner() {
+                    break;
+                }
             }
             _ => {}
         }
@@ -100,10 +96,18 @@ fn parse_interface<'a, R: BufRead>(
             #[allow(clippy::cast_possible_truncation)]
             Ok(Event::Start(bytes)) => {
                 let event_or_request = bytes.name().into_inner();
-                let is_request = event_or_request == b"request";
+                let is_request = match event_or_request {
+                    b"request" => true,
+                    b"event" => false,
+                    _ => continue,
+                };
                 let msg = parse_message(
                     reader,
-                    interface.requests.len() as u32,
+                    if is_request {
+                        interface.requests.len() as u32
+                    } else {
+                        interface.events.len() as u32
+                    },
                     bytes.attributes(),
                     event_or_request, // event or request
                     is_request,

@@ -4,7 +4,7 @@
 
 use crate::basics::NoDebug;
 use crate::for_handlers::MessageHandler;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{Result as IoResult, Write};
 pub use std::sync::OnceLock;
@@ -12,17 +12,17 @@ pub use std::sync::OnceLock;
 #[derive(Debug)]
 pub struct Protocol<'a> {
     pub name: String,
-    pub interfaces: Vec<&'a Interface<'a>>,
+    pub interfaces: HashMap<&'a str, &'a Interface<'a>>,
     pub(crate) active: OnceLock<()>,
 }
 
 impl<'a> Protocol<'a> {
     pub(crate) fn new(name: String) -> Protocol<'a> {
-        Protocol { name, interfaces: Vec::new(), active: OnceLock::new() }
+        Protocol { name, interfaces: HashMap::new(), active: OnceLock::new() }
     }
 
     pub fn find_interface(&self, name: &str) -> Option<&Interface<'a>> {
-        self.interfaces.iter().find(|iface| iface.name == name).copied()
+        self.interfaces.get(name).copied()
     }
 
     pub fn is_active(&self) -> bool {

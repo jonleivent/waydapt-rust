@@ -113,7 +113,8 @@ fn globals_and_handlers(
 
     let globals_filename =
         matches.opt_str("g").expect("-g required globals file option is missing");
-    let active_interfaces = active_interfaces(all_protocol_files, &globals_filename);
+    let allow_missing = matches.opt_present("m");
+    let active_interfaces = active_interfaces(all_protocol_files, &globals_filename, allow_missing);
 
     let session_handlers = gather_handlers(all_args, init_handlers, active_interfaces);
 
@@ -181,6 +182,7 @@ fn get_options() -> Options {
         "FILE",
     );
     opts.optflag("h", "help", "print this help");
+    opts.optflag("m", "allowmissing", "allow global entries that don't appear in protocol files");
     opts.optopt("o", "output", "dump processed protocol and handler info to file", "FILE");
     opts.optmulti("p", "protofile", "a protocol XML file (can appear multiple times)", "FILE");
     opts.optmulti(

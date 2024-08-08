@@ -31,6 +31,7 @@ impl Alloc for Bump {
 
 pub(crate) fn active_interfaces(
     protocol_filenames: impl IntoIterator<Item = PathBuf>, globals_filename: &str,
+    allow_missing: bool,
 ) -> &'static ActiveInterfaces {
     static ACTIVE_INTERFACES: OnceLock<&ActiveInterfaces> = OnceLock::new();
     ACTIVE_INTERFACES.get_or_init(|| {
@@ -47,8 +48,8 @@ pub(crate) fn active_interfaces(
             all_protocols.push(protocol);
         }
         let display = maybe_display.expect("Missing base wayland protocol");
-        let map = postparse(&all_protocols, globals_filename);
-        assert!(display.is_active(), "wl_display is not active");
+        let map = postparse(&all_protocols, globals_filename, allow_missing);
+        debug_assert!(display.is_active(), "wl_display is not active");
         alloc.alloc(ActiveInterfacesA { map, display })
     })
 }
@@ -60,21 +61,24 @@ fn fixup_wayland_get_display<'a>(wayland_protocol: &'a Protocol<'a>) -> &'a Inte
     let registry =
         wayland_protocol.find_interface("wl_registry").expect("Missing interface wl_registry");
     let bind = registry.requests.first().expect("Interface wl_registry has no requests");
-    assert_eq!(bind.name, "bind");
+    assert_eq!(bind.name, "bind", "Expected wl_registry::bind, got {bind:?}");
     bind.special.set(SpecialMessage::WlRegistryBind).unwrap();
 
     let global = registry.events.first().expect("Interface wl_registry has no events");
-    assert_eq!(global.name, "global");
+    assert_eq!(global.name, "global", "Expected wl_registry::global, got {global:?}");
     global.special.set(SpecialMessage::WlRegistryGlobal).unwrap();
 
     let display =
         wayland_protocol.find_interface("wl_display").expect("Missing interface wl_display");
+    // Set the display limited version to 1, since it never changes, and isn't allowed in the
+    // globals file:
+    display.limited_version.set(1).unwrap();
     let sync = display.requests.first().expect("Interface wl_display has no requests");
-    assert_eq!(sync.name, "sync");
+    assert_eq!(sync.name, "sync", "Expected wl_display::sync, got {sync:?}");
     sync.special.set(SpecialMessage::WlDisplaySync).unwrap();
 
-    let delete_id = display.events.first().expect("Interface wl_display has no events");
-    assert_eq!(delete_id.name, "delete_id");
+    let delete_id = display.events.get(1).expect("Interface wl_display has no delete_id event");
+    assert_eq!(delete_id.name, "delete_id", "Expected wl_display::delete_id, got {delete_id:?}");
     delete_id.special.set(SpecialMessage::WlDisplayDeleteId).unwrap();
 
     let callback =
@@ -122,7 +126,9 @@ impl<'a> ActiveInterfacesA<'a> {
     }
 }
 
-fn postparse<'a>(protocols: &AllProtocols<'a>, globals_filename: &str) -> ActiveInterfaceMap<'a> {
+fn postparse<'a>(
+    protocols: &AllProtocols<'a>, globals_filename: &str, allow_missing: bool,
+) -> ActiveInterfaceMap<'a> {
     // First pass: set the owner backpointers (which cannot be set during parsing without using
     // comprehensive internal mutability), find new_id args on messages and set their interfaces if
     // they're local to the owning protocol, else put them on externals.  Also set parents
@@ -132,7 +138,7 @@ fn postparse<'a>(protocols: &AllProtocols<'a>, globals_filename: &str) -> Active
     // Second pass (well, not really a pass - the iteration is over lines in the globals file):
     // determine which protocols and global interfaces are active based on the globals file, which
     // also includes a version limit for each global.
-    get_globals_limits(&parentless, globals_filename, protocols);
+    get_globals_limits(&parentless, globals_filename, protocols, allow_missing);
 
     // Third pass: propagate version limits to non-globals in the same protocol according to the
     // rules in: https://wayland.freedesktop.org/docs/html/ch04.html#sect-Protocol-Versioning. This
@@ -152,7 +158,7 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
     let mut externals = Vec::new(); // should only be a few
     let mut parentless: InterfaceMap = HashMap::new(); // potential globals
     for protocol @ Protocol { interfaces, .. } in protocols {
-        for interface @ Interface { owner, .. } in interfaces {
+        for interface @ Interface { owner, .. } in interfaces.values() {
             owner.set(protocol).expect("should only be set here");
             for message @ Message { owner, new_id_interface, .. } in interface.all_messages() {
                 owner.set(interface).expect("should only be set here");
@@ -175,14 +181,16 @@ fn externals_parentless_set_owners<'a>(protocols: &AllProtocols<'a>) -> External
         // Gather parentless interfaces as potential globals for use by set_global_limits.  Note
         // that parent_interface is set above, but not on the interface being looped over - so this
         // has to be a separate loop over interfaces.
-        for interface in interfaces.iter().filter(|i| i.parent.get().is_none()) {
+        for interface in interfaces.values().filter(|i| i.parent.get().is_none()) {
             parentless.entry(&interface.name).or_default().push(interface);
         }
     }
     (externals, parentless)
 }
 
-fn get_globals_limits(parentless: &InterfaceMap, filename: &str, protocols: &AllProtocols<'_>) {
+fn get_globals_limits(
+    parentless: &InterfaceMap, filename: &str, protocols: &AllProtocols<'_>, allow_missing: bool,
+) {
     for (n, ref name, version_limit) in global_limits(filename) {
         match parentless.get(name.as_str()).map(Vec::as_slice) {
             Some([interface @ Interface { parsed_version, limited_version, .. }]) => {
@@ -198,9 +206,10 @@ fn get_globals_limits(parentless: &InterfaceMap, filename: &str, protocols: &All
             Some([]) => panic!("empty vector element in parentless map"),
             Some(multiple) => panic!("Multiple globals with same name: {}", Foster(multiple)),
             None => {
-                if protocols.iter().flat_map(|p| &p.interfaces).any(|i| &i.name == name) {
-                    panic!("Non-global interface {name} in global limits file {filename} line {n}");
-                } else {
+                if let Some(iface) = protocols.iter().find_map(|p| p.find_interface(name)) {
+                    let parent_name = &iface.parent.get().unwrap().name;
+                    panic!("Non-global interface {name} (parent {parent_name}) in global limits file {filename} line {n}");
+                } else if !allow_missing {
                     panic!("Interface {name} not found: global limits file {filename} line {n}")
                 }
             }
@@ -216,7 +225,7 @@ fn get_globals_limits(parentless: &InterfaceMap, filename: &str, protocols: &All
 // don't propagate across external links.
 fn propagate_limits_find_actives<'a>(protocols: &AllProtocols<'a>) -> ActiveInterfaceMap<'a> {
     let mut active_interfaces: ActiveInterfaceMap = HashMap::new();
-    let is = protocols.iter().filter(|p| p.is_active()).flat_map(|p| p.interfaces.iter());
+    let is = protocols.iter().filter(|p| p.is_active()).flat_map(|p| p.interfaces.values());
     for interface @ Interface { name, limited_version, parsed_version, .. } in is {
         let global_ancestor = interface.global_ancestor();
         let Some(global_limit) = global_ancestor.limited_version.get() else { continue };
@@ -227,10 +236,14 @@ fn propagate_limits_find_actives<'a>(protocols: &AllProtocols<'a>) -> ActiveInte
         for message in interface.all_messages().filter(|m| m.since <= limit) {
             message.active.set(()).expect("message.active should only be set here");
         }
-        assert!(
-            interface.same_as(global_ancestor) && limited_version.set(limit).is_ok(),
-            "non-global interface.limited_version should only be set here"
-        );
+        if !interface.same_as(global_ancestor) {
+            assert!(
+                limited_version.set(limit).is_ok(),
+                "non-global {} with global {} limited_version clash",
+                interface.name,
+                global_ancestor.name
+            );
+        }
     }
     active_interfaces
 }
