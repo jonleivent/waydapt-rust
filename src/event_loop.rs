@@ -14,15 +14,20 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()>
     let flags = EventFlags::IN | EventFlags::OUT | EventFlags::ET;
     let mut count = 0;
     for fd in fds {
-        let data = EventData::new_u64(count);
+        let data = EventData::new_u64(count as u64);
         epoll::add(&epoll_fd, fd, data, flags)?;
         count += 1;
     }
+    debug_assert!(count > 0);
+    // Since everything is edge-triggered, we may miss initial input state, so try it here:
+    for i in 0..count {
+        event_handler.handle_input(i)?;
+    }
     #[allow(clippy::cast_possible_truncation)]
-    let mut events = EventVec::with_capacity(count as usize); // would longer help?
+    let mut events = EventVec::with_capacity(count); // would longer help?
     loop {
-        epoll::wait(&epoll_fd, &mut events, 0)?;
-        // should never occur with 0 timeout:
+        epoll::wait(&epoll_fd, &mut events, -1)?;
+        // should never occur with no timeout:
         assert!(!events.is_empty(), "Got 0 events from epoll::wait");
         for Event { flags, data } in &events {
             #[allow(clippy::cast_possible_truncation)]

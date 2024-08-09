@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 arrayvec = "0.7.4"
 bumpalo = "3.16.0"
-dlopen2 = "0.7.0"
 getopts = "0.2.21"
 libc = "0.2.155"
 quick-xml = "0.31.0"

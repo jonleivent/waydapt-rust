@@ -13,6 +13,7 @@ use getopts::{Matches, Options, ParsingStyle};
 use std::collections::VecDeque;
 use std::env::Args;
 use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
 
     if matches.opt_present("h") {
         let brief = format!("Usage: {program} [options] -- ...dlls-and-their-options...");
-        print!("{}", opts.usage(&brief));
+        eprint!("{}", opts.usage(&brief));
         return ExitCode::SUCCESS;
     }
 
@@ -45,10 +46,11 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
         globals_and_handlers(&matches, all_args, init_handlers);
 
     // Start listening on the socket for our clients:
-    let listener = start_listening(&matches);
+    let mut listener = start_listening(&matches);
+    let unix_listener = listener.take_unix_listener();
 
     // How we accept new clients will be similar whether we fork sessions or not:
-    let accept = || accept_clients(listener, options, active_interfaces, session_handlers);
+    let accept = || accept_clients(unix_listener, options, active_interfaces, session_handlers);
 
     // If we're going to fork client sessions, then we don't need any special multi-threaded
     // exit magic (to enable other threads to end the process in an orderly fashion, with
@@ -57,7 +59,10 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
         accept(); // accept_clients in this thread
         ExitCode::SUCCESS
     } else {
-        // accept clients in second thread, so that this main thread can wait:
+        // accept clients in second thread, so that this main thread can wait: TBD: the second
+        // thread has ownership of the listener, and so is responsible for removing the socket and
+        // lock files - but it won't be told about the exit.  How to get it to shutdown properly and
+        // do the listener drop?
         std::thread::spawn(accept);
         // Wait for any thread to report a problem, or exit due to the terminate option:
         multithread_exit_handler()
@@ -130,6 +135,7 @@ fn globals_and_handlers(
 
 fn start_listening(matches: &Matches) -> SocketListener {
     use rustix::fs::{flock, FlockOperation};
+
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
     let listener = SocketListener::new(display_name);
 
@@ -202,9 +208,10 @@ fn get_options() -> Options {
 }
 
 fn accept_clients(
-    listener: SocketListener, options: &'static SharedOptions,
-    interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
+    listener: UnixListener, options: &'static SharedOptions, interfaces: &'static ActiveInterfaces,
+    handlers: &'static VecDeque<SessionInitHandler>,
 ) {
+    let listener = listener; // avoid warning about needless pass by value
     let fork_sessions = options.fork_sessions;
     for client_stream in listener.incoming() {
         let Ok(client_stream) = client_stream else {
@@ -222,9 +229,6 @@ fn accept_clients(
             // we are in the main thread (because fork_sessions), so unwrap failing will terminate
             // the process:
             let ForkResult::Child = unsafe { double_fork() }.unwrap() else { continue };
-            // We need to drop the listener (but not remove_file at the corresponding paths)
-            // because as the child, we have no need for them, but they won't drop on their own:
-            listener.drop_without_removes();
             return session();
         }
         // dropping the returned JoinHandle detaches the thread, which is what we want

@@ -14,6 +14,7 @@ type RInterface = &'static Interface<'static>;
 pub enum ObjectEntry {
     Live(RInterface),
     Deleted(RInterface),
+    NeverUsed,
 }
 
 #[derive(Debug)]
@@ -24,7 +25,12 @@ pub(crate) struct WaylandObjectMap<P: Peer> {
 
 impl<P: Peer> WaylandObjectMap<P> {
     pub(crate) fn new() -> Self {
-        Self { vect: Vec::new(), _pd: PhantomData }
+        let mut s = Self { vect: Vec::new(), _pd: PhantomData };
+        if !P::IS_SERVER {
+            // The client never uses id==0, so occupy it:
+            s.vect.push(ObjectEntry::NeverUsed);
+        }
+        s
     }
 
     pub(crate) fn try_lookup(&self, id: u32) -> Option<ObjectEntry> {
@@ -46,7 +52,9 @@ impl<P: Peer> WaylandObjectMap<P> {
         if id == self.vect.len() {
             self.vect.push(ObjectEntry::Live(interface));
         } else {
-            let Some(e) = self.vect.get_mut(id) else { panic!("Out of range add") };
+            let Some(e) = self.vect.get_mut(id) else {
+                panic!("Out of range add id: {id}, interface: {interface}")
+            };
             if let ObjectEntry::Live(_) = *e {
                 // we trust the server to replace live entries without having seen a delete request
                 // from the client (because there are none):

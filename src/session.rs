@@ -60,7 +60,7 @@ impl<'a> EventHandler for Session<'a> {
                 // We need to pass index into handle so it knows whether the msg is a request or event.
                 self.mediator.mediate(source_side, msg, fds, outbuf)?;
             }
-            debug_assert!(msg_count > 0);
+            //debug_assert!(msg_count > 0);
             total_msg_count += msg_count;
         }
 
@@ -75,9 +75,9 @@ impl<'a> EventHandler for Session<'a> {
     fn handle_output(&mut self, index: usize) -> IoResult<()> {
         // If we don't force the flush to include the last partial chunk, what will cause that
         // last partial chunk to get sent?  Maybe nothing.  So we have to force it here.
-        let amount = self.out_buffers[index].flush(/*force:*/ true)?;
+        let _amount = self.out_buffers[index].flush(/*force:*/ true)?;
         // should we check the amount flushed?
-        debug_assert!(amount > 0);
+        //debug_assert!(amount > 0);
         Ok(())
     }
 }
@@ -119,6 +119,7 @@ pub(crate) fn client_session(
 ) {
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
+    use std::io::ErrorKind;
 
     let server_socket_path = crate::listener::get_server_socket_path();
 
@@ -147,5 +148,11 @@ pub(crate) fn client_session(
 
     let mut session = Session::new(&init_info, [&client_stream, &server_stream]);
 
-    crate::event_loop::event_loop(&mut session).unwrap();
+    if let Err(e) = crate::event_loop::event_loop(&mut session) {
+        match e.kind() {
+            ErrorKind::ConnectionReset => eprintln!("Connection reset for {ucred:?}"),
+            ErrorKind::ConnectionAborted => eprintln!("Connection aborted for {ucred:?}"),
+            _ => eprintln!("Unexpected session error: {e:?} for {ucred:?}"),
+        }
+    }
 }
