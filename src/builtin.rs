@@ -34,7 +34,7 @@ fn wl_registry_global_handler(
 fn wl_display_delete_id_handler(
     msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo,
 ) -> MessageHandlerResult {
-    let ArgData::Object(id) = msg.get_arg(0) else { unreachable!() };
+    let ArgData::Uint(id) = msg.get_arg(0) else { unreachable!() };
     // should we check if this is the wayland-idfix handshake initial message from the server?  If
     // it is, it has !0 as a server object id, which will never exist, so delete of it will do
     // nothing (it won't panic either).

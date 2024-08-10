@@ -27,10 +27,14 @@ impl MessageHeader {
         let word2 = ((self.size as u32) << 16) | self.opcode as u32;
         [word1, word2]
     }
+
+    pub(crate) fn len32(&self) -> usize {
+        (self.size as usize + 3) / 4
+    }
 }
 
 #[inline]
 pub(crate) fn get_msg_length(header: &[u32]) -> Option<usize> {
     let word_2 = header.get(1)?;
-    Some((word_2 >> 16) as usize)
+    Some(((word_2 >> 16) as usize + 3) / 4)
 }

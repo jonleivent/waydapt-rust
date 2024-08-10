@@ -297,7 +297,7 @@ impl<'a> Messenger for OutBuffer<'a> {
             #![allow(clippy::cast_possible_truncation)]
             // we know this won't truncate because MAX_WORDS_OUT is <= the max u16:
             debug_assert!(u16::try_from(MAX_WORDS_OUT).is_ok());
-            header.size = len as u16;
+            header.size = 4 * (len as u16);
         };
         // Now, write the updated header:
         end_chunk[orig_len..orig_len + 2].copy_from_slice(&header.as_words());
