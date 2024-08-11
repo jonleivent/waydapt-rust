@@ -3,7 +3,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
-use crate::basics::LEAKER;
+use crate::basics::{UnwindDo, LEAKER};
 use crate::crate_traits::Alloc;
 use bumpalo::Bump;
 use std::cmp::min;
@@ -38,7 +38,8 @@ pub(crate) fn active_interfaces(
         let alloc = LEAKER.alloc(Bump::new());
         let mut all_protocols: Vec<&'static Protocol<'static>> = Vec::new();
         let mut maybe_display = None; // wl_display must exist
-        for protocol_filename in protocol_filenames {
+        for ref protocol_filename in protocol_filenames {
+            let _ud = UnwindDo(|| eprintln!("Parsing {}", protocol_filename.as_path().display()));
             let file = File::open(protocol_filename).unwrap();
             let protocol = super::parse::parse(file, alloc);
             if protocol.name == "wayland" {
@@ -209,8 +210,10 @@ fn get_globals_limits(
                 if let Some(iface) = protocols.iter().find_map(|p| p.find_interface(name)) {
                     let parent_name = &iface.parent.get().unwrap().name;
                     panic!("Non-global interface {name} (parent {parent_name}) in global limits file {filename} line {n}");
-                } else if !allow_missing {
-                    panic!("Interface {name} not found: global limits file {filename} line {n}")
+                } else if allow_missing {
+                    eprintln!("Interface {name} not found: global limits file {filename} line {n}");
+                } else {
+                    panic!("Interface {name} not found: global limits file {filename} line {n}");
                 }
             }
         }

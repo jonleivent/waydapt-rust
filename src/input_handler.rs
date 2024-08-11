@@ -188,25 +188,25 @@ mod debug {
     impl<'a> Mediator<'a> {
         fn eprint_flow_unified(&self, from_server: bool) {
             if from_server {
-                eprint!("server->waydapt->client[{}]", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("server->waydapt->client[{}] ", self.init_info.ucred.pid.as_raw_nonzero());
             } else {
-                eprint!("client[{}]->waydapt->server", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("client[{}]->waydapt->server ", self.init_info.ucred.pid.as_raw_nonzero());
             }
         }
 
         fn eprint_flow_in(&self, from_server: bool) {
             if from_server {
-                eprint!("server->waydapt[{}]", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("server->waydapt[{}] ", self.init_info.ucred.pid.as_raw_nonzero());
             } else {
-                eprint!("client[{}]->waydapt", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("client[{}]->waydapt ", self.init_info.ucred.pid.as_raw_nonzero());
             }
         }
 
         fn eprint_flow_out(&self, from_server: bool) {
             if from_server {
-                eprint!("waydapt->client[{}]", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("waydapt->client[{}] ", self.init_info.ucred.pid.as_raw_nonzero());
             } else {
-                eprint!("waydapt[{}]->server", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("waydapt[{}]->server ", self.init_info.ucred.pid.as_raw_nonzero());
             }
         }
 

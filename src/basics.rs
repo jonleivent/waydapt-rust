@@ -2,6 +2,8 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::inline_always)]
 
+use std::thread::panicking;
+
 use crate::crate_traits::{AllBitValuesSafe, Alloc};
 
 pub(crate) const MAX_FDS_OUT: usize = 28;
@@ -101,5 +103,15 @@ impl<T: ?Sized> std::ops::Deref for NoDebug<T> {
 impl<T: ?Sized> std::ops::DerefMut for NoDebug<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+pub struct UnwindDo<F: FnOnce() + Copy>(pub F);
+
+impl<F: FnOnce() + Copy> Drop for UnwindDo<F> {
+    fn drop(&mut self) {
+        if panicking() {
+            self.0();
+        }
     }
 }
