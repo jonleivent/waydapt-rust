@@ -3,7 +3,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
-use crate::crate_traits::Alloc;
+use crate::{basics::UnwindDo, crate_traits::Alloc};
 use std::{
     io::{BufRead, BufReader, Read},
     str::FromStr,
@@ -61,7 +61,7 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, alloc: &impl Alloc) -> &Pro
         }
         e => panic!("Ill-formed protocol file: {e:?}"),
     };
-
+    let _ud = UnwindDo(|| eprintln!("In protocol {}", &protocol.name));
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(bytes)) => {
@@ -94,6 +94,7 @@ fn parse_interface<'a, R: BufRead>(
         }
     }
 
+    let _ud = UnwindDo(|| eprintln!("In interface {}", &interface.name));
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -144,7 +145,9 @@ fn parse_message<'a, R: BufRead>(
             _ => {}
         }
     }
-
+    let _ud = UnwindDo(|| {
+        eprintln!("In {} {}", std::str::from_utf8(event_or_request).unwrap(), &message.name);
+    });
     let mut num_fds = 0;
     let mut buf = Vec::new();
     loop {

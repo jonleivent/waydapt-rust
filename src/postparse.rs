@@ -39,7 +39,7 @@ pub(crate) fn active_interfaces(
         let mut all_protocols: Vec<&'static Protocol<'static>> = Vec::new();
         let mut maybe_display = None; // wl_display must exist
         for ref protocol_filename in protocol_filenames {
-            let _ud = UnwindDo(|| eprintln!("Parsing {}", protocol_filename.as_path().display()));
+            let _ud = UnwindDo(|| eprintln!("In file {}", protocol_filename.as_path().display()));
             let file = File::open(protocol_filename).unwrap();
             let protocol = super::parse::parse(file, alloc);
             if protocol.name == "wayland" {
