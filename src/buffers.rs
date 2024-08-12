@@ -118,6 +118,7 @@ pub(crate) struct OutBuffer<'a> {
     free_chunks: Chunks,
     fds: VecDeque<OwnedFd>,
     pub(crate) flush_every_send: bool,
+    wait_for_output_event: bool,
     stream: &'a IOStream,
 }
 
@@ -144,6 +145,7 @@ impl<'a> OutBuffer<'a> {
             // force a flush:
             fds: VecDeque::with_capacity(MAX_FDS_OUT + MAX_ARGS),
             flush_every_send: false,
+            wait_for_output_event: false,
             stream,
         }
     }
@@ -177,14 +179,10 @@ impl<'a> OutBuffer<'a> {
     }
 
     #[inline]
-    fn end(&self) -> &Chunk {
-        self.chunks.back().expect(MUST_HAVE1)
-    }
+    fn end(&self) -> &Chunk { self.chunks.back().expect(MUST_HAVE1) }
 
     #[inline]
-    fn end_mut(&mut self) -> &mut Chunk {
-        self.chunks.back_mut().expect(MUST_HAVE1)
-    }
+    fn end_mut(&mut self) -> &mut Chunk { self.chunks.back_mut().expect(MUST_HAVE1) }
 
     #[inline]
     fn too_many_fds(&self) -> bool {
@@ -194,6 +192,8 @@ impl<'a> OutBuffer<'a> {
         // but we can't send fds without data to help.
         self.fds.len() > self.chunks.len() * MAX_FDS_OUT
     }
+
+    pub(crate) fn got_output_event(&mut self) { self.wait_for_output_event = false; }
 
     pub(crate) fn flush(&mut self, force: bool) -> IoResult<usize> {
         let mut total_flushed = 0;
@@ -219,7 +219,7 @@ impl<'a> OutBuffer<'a> {
 
     fn flush_first_chunk(&mut self) -> IoResult<usize> {
         let first_chunk = self.chunks.front_mut().expect(MUST_HAVE1);
-        if first_chunk.is_empty() {
+        if self.wait_for_output_event || first_chunk.is_empty() {
             // Nothing to do
             return Ok(0);
         }
@@ -233,7 +233,7 @@ impl<'a> OutBuffer<'a> {
         if nwords_flushed > 0 {
             // If the flush happened, then we expect the whole chunk was taken:
             debug_assert_eq!(nwords_flushed, first_chunk.len());
-            // remove flushed fds, which will close the corresponding files:
+            // remove flushed fds, which are owned, so this will do closes:
             self.fds.drain(..nfds_flushed);
             // remove flushed msg data:
             first_chunk.clear();
@@ -250,6 +250,10 @@ impl<'a> OutBuffer<'a> {
                 self.chunks = rest_active_chunks;
                 debug_assert!(!self.chunks.is_empty());
             }
+        } else {
+            // If the flush did nothing, there is no need to try again until we've been told by the
+            // event loop that there's room:
+            self.wait_for_output_event = true;
         }
         Ok(nwords_flushed)
     }
@@ -376,9 +380,7 @@ pub(crate) struct ExtendChunk<'a>(pub(self) &'a mut Chunk);
 impl<'a> ExtendChunk<'a> {
     #![allow(clippy::inline_always)]
     #[inline(always)]
-    pub(crate) fn add_u32(&mut self, data: u32) {
-        self.0.push(data);
-    }
+    pub(crate) fn add_u32(&mut self, data: u32) { self.0.push(data); }
 
     #[inline(always)]
     pub(crate) fn add_i32(&mut self, data: i32) {

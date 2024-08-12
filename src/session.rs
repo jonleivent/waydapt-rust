@@ -38,9 +38,7 @@ impl<'a> Session<'a> {
 }
 
 impl<'a> EventHandler for Session<'a> {
-    fn fds_to_monitor(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
-        self.fds.into_iter()
-    }
+    fn fds_to_monitor(&self) -> impl Iterator<Item = BorrowedFd<'_>> { self.fds.into_iter() }
 
     fn handle_input(&mut self, index: usize) -> IoResult<()> {
         // By trying receive repeatedly until there's nothing left, we can use edge triggered IN
@@ -75,7 +73,9 @@ impl<'a> EventHandler for Session<'a> {
     fn handle_output(&mut self, index: usize) -> IoResult<()> {
         // If we don't force the flush to include the last partial chunk, what will cause that
         // last partial chunk to get sent?  Maybe nothing.  So we have to force it here.
-        let _amount = self.out_buffers[index].flush(/*force:*/ true)?;
+        let buf = &mut self.out_buffers[index];
+        buf.got_output_event();
+        let _amount = buf.flush(/*force:*/ true)?;
         // should we check the amount flushed?
         //debug_assert!(amount > 0);
         Ok(())
@@ -97,17 +97,11 @@ impl Debug for WaydaptSessionInitInfo {
 }
 
 impl SessionInitInfo for WaydaptSessionInitInfo {
-    fn ucred(&self) -> rustix::net::UCred {
-        self.ucred
-    }
+    fn ucred(&self) -> rustix::net::UCred { self.ucred }
 
-    fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
-        self.active_interfaces
-    }
+    fn get_active_interfaces(&self) -> &'static ActiveInterfaces { self.active_interfaces }
 
-    fn get_display(&self) -> &'static Interface<'static> {
-        self.active_interfaces.get_display()
-    }
+    fn get_display(&self) -> &'static Interface<'static> { self.active_interfaces.get_display() }
 }
 
 // For errors that should kill off the process even if in multithreaded mode, call

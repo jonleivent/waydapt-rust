@@ -14,18 +14,15 @@ pub(crate) const MAX_WORDS_OUT: usize = MAX_BYTES_OUT / 4;
 pub(crate) const MAX_ARGS: usize = 20; // WL_CLOSURE_MAX_ARGS in wayland
 
 #[inline(always)]
-pub(crate) const fn round4(x: usize) -> usize {
-    (x + 3) & !3
-}
+pub(crate) const fn round4(x: usize) -> usize { (x + 3) & !3 }
 
 pub(crate) struct Leaker;
 
 pub(crate) const LEAKER: Leaker = Leaker;
 
 impl Alloc for Leaker {
-    fn alloc<T>(&self, it: T) -> &mut T {
-        Box::leak(Box::new(it))
-    }
+    #[inline]
+    fn alloc<T>(&self, it: T) -> &mut T { Box::leak(Box::new(it)) }
 }
 
 #[inline(always)]
@@ -95,15 +92,13 @@ impl<T: ?Sized> std::fmt::Debug for NoDebug<T> {
 
 impl<T: ?Sized> std::ops::Deref for NoDebug<T> {
     type Target = T;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target { &self.0 }
 }
 
 impl<T: ?Sized> std::ops::DerefMut for NoDebug<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 pub struct UnwindDo<F: FnOnce() + Copy>(pub F);
