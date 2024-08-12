@@ -75,13 +75,24 @@ impl<'a> InBuffer<'a> {
         // of dealing with string or array message args that wrap.
         let len = self.back - self.front;
         debug_assert!(len <= MAX_WORDS_OUT);
+        if len == 0 {
+            // No compact needed, just reset front and back:
+            self.back = 0;
+            self.front = 0;
+            return;
+        }
         // Compacting more often than absolutely necessary has a cost, but it may improve CPU
         // cache friendliness.
-        let threshold = match COMPACT_SCHEME {
-            CompactScheme::Eager => len,
-            CompactScheme::Lazy => MAX_WORDS_OUT + 1,
+        let threshold_reached = match COMPACT_SCHEME {
+            // Eager means compact as soon as there is room to do so without overlap between the
+            // region of msgs and where they are being compacted to (which is the front of the
+            // chunk):
+            CompactScheme::Eager => self.front >= len,
+            // Lazy means compact only when absolutely necessary, which means when the space left
+            // after back isn't enough to hold a max-sized msg:
+            CompactScheme::Lazy => self.back > MAX_WORDS_OUT,
         };
-        if self.front >= threshold {
+        if threshold_reached {
             // the total current payload fits below front, so move it there.  We can use the
             // memcpy-based copy_from_slice instead of the memmove-based copy_within because of
             // the extra room.  Doing so may get us some vectorization speedup.
@@ -158,20 +169,24 @@ impl<'a> OutBuffer<'a> {
         self.chunks.append(&mut new_end);
     }
 
+    #[inline]
     fn is_empty(&self) -> bool {
         #![allow(dead_code)]
         // The whole OutBuffer is considered empty if its first chunk is empty
         self.chunks.front().expect(MUST_HAVE1).is_empty()
     }
 
+    #[inline]
     fn end(&self) -> &Chunk {
         self.chunks.back().expect(MUST_HAVE1)
     }
 
+    #[inline]
     fn end_mut(&mut self) -> &mut Chunk {
         self.chunks.back_mut().expect(MUST_HAVE1)
     }
 
+    #[inline]
     fn too_many_fds(&self) -> bool {
         // This condition is dangerous to the receiver, because we are limited to sending
         // MAX_FDS_OUT fds with each chunk.  If we sent all of the chunks and still had fds to send,
@@ -347,7 +362,7 @@ pub enum CompactScheme {
     Lazy,
 }
 
-const COMPACT_SCHEME: CompactScheme = CompactScheme::Eager;
+const COMPACT_SCHEME: CompactScheme = CompactScheme::Lazy;
 
 const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
 const ALLOWED_EXCESS_CHUNKS: usize = 8;
