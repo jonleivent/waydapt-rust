@@ -39,8 +39,9 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()>
             if flags.contains(EventFlags::IN) {
                 event_handler.handle_input(i)?;
             }
-            if !flags.difference(EventFlags::IN | EventFlags::OUT).is_empty() {
-                event_handler.handle_error(i, flags)?;
+            let error_flags = flags.difference(EventFlags::IN | EventFlags::OUT);
+            if !error_flags.is_empty() {
+                event_handler.handle_error(i, error_flags)?;
             }
         }
         events.clear(); // may not be needed

@@ -2,13 +2,14 @@
 
 use std::env;
 use std::fs::{remove_file, File, Metadata};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 pub(crate) struct SocketListener {
     socket_path: PathBuf,
-    unix_listener: Option<UnixListener>,
+    unix_listener: UnixListener,
     lock_path: PathBuf,
     do_removes: bool,
 }
@@ -52,16 +53,22 @@ impl SocketListener {
         if socket_path.try_exists().unwrap() {
             remove_file(&socket_path).unwrap();
         }
-        let unix_listener = Some(UnixListener::bind(&socket_path).unwrap());
+        let unix_listener = UnixListener::bind(&socket_path).unwrap();
         Self { socket_path, unix_listener, lock_path, do_removes: true }
     }
 
-    #[allow(unused)]
     pub(crate) fn drop_without_removes(mut self) { self.do_removes = false; }
+}
 
-    pub(crate) fn take_unix_listener(&mut self) -> UnixListener {
-        self.unix_listener.take().unwrap()
-    }
+impl Deref for SocketListener {
+    type Target = UnixListener;
+    #[inline]
+    fn deref(&self) -> &Self::Target { &self.unix_listener }
+}
+
+impl DerefMut for SocketListener {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.unix_listener }
 }
 
 fn metadata_eq(meta1: &Metadata, meta2: &Metadata) -> bool {

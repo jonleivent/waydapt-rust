@@ -12,7 +12,6 @@ use getopts::{Matches, Options, ParsingStyle};
 use std::collections::VecDeque;
 use std::env::Args;
 use std::os::unix::io::{FromRawFd, OwnedFd};
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -45,11 +44,10 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
         globals_and_handlers(&matches, all_args, init_handlers);
 
     // Start listening on the socket for our clients:
-    let mut listener = start_listening(&matches);
-    let unix_listener = listener.take_unix_listener();
+    let listener = start_listening(&matches);
 
     // How we accept new clients will be similar whether we fork sessions or not:
-    let accept = || accept_clients(unix_listener, options, active_interfaces, session_handlers);
+    let accept = || accept_clients(listener, options, active_interfaces, session_handlers);
 
     // If we're going to fork client sessions, then we don't need any special multi-threaded
     // exit magic (to enable other threads to end the process in an orderly fashion, with
@@ -208,11 +206,10 @@ fn get_options() -> Options {
 }
 
 fn accept_clients(
-    listener: UnixListener, options: &'static SharedOptions, interfaces: &'static ActiveInterfaces,
-    handlers: &'static VecDeque<SessionInitHandler>,
+    listener: SocketListener, options: &'static SharedOptions,
+    interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
 ) {
     #![allow(unsafe_code)]
-    let listener = listener; // avoid warning about needless pass by value
     let fork_sessions = options.fork_sessions;
     for client_stream in listener.incoming() {
         let Ok(client_stream) = client_stream else {
@@ -230,6 +227,7 @@ fn accept_clients(
             // we are in the main thread (because fork_sessions), so unwrap failing will terminate
             // the process:
             let ForkResult::Child = unsafe { double_fork() }.unwrap() else { continue };
+            listener.drop_without_removes();
             return session();
         }
         // dropping the returned JoinHandle detaches the thread, which is what we want
