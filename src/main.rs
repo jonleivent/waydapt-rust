@@ -1,3 +1,8 @@
+#![warn(clippy::pedantic)]
+#![deny(unsafe_code)]
+#![forbid(clippy::large_types_passed_by_value)]
+#![forbid(clippy::large_stack_frames)]
+
 pub mod addons;
 pub mod basics;
 pub mod buffers;
@@ -8,9 +13,9 @@ pub mod for_handlers;
 pub mod forking;
 pub mod handlers;
 pub mod header;
-pub mod input_handler;
 pub mod listener;
 pub mod map;
+pub mod mediator;
 pub mod message;
 pub mod multithread_exit;
 pub mod parse;
@@ -21,6 +26,4 @@ pub mod setup;
 pub mod streams;
 pub mod terminator;
 
-fn main() -> std::process::ExitCode {
-    setup::startup(&addons::get_addon_handlers())
-}
+fn main() -> std::process::ExitCode { setup::startup(&addons::get_addon_handlers()) }

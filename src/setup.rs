@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 use crate::addons::IHMap;
 use crate::basics::Leaker;
 use crate::crate_traits::Alloc;
@@ -134,6 +133,7 @@ fn globals_and_handlers(
 }
 
 fn start_listening(matches: &Matches) -> SocketListener {
+    #![allow(unsafe_code)]
     use rustix::fs::{flock, FlockOperation};
 
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
@@ -211,6 +211,7 @@ fn accept_clients(
     listener: UnixListener, options: &'static SharedOptions, interfaces: &'static ActiveInterfaces,
     handlers: &'static VecDeque<SessionInitHandler>,
 ) {
+    #![allow(unsafe_code)]
     let listener = listener; // avoid warning about needless pass by value
     let fork_sessions = options.fork_sessions;
     for client_stream in listener.incoming() {

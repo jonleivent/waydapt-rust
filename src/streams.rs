@@ -1,8 +1,4 @@
-#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
-#![forbid(clippy::large_types_passed_by_value)]
-#![forbid(clippy::large_stack_frames)]
-
 use crate::basics::{to_u8_slice, to_u8_slice_mut, uninit_array, MAX_FDS_OUT};
 use crate::crate_traits::AllBitValuesSafe;
 use rustix::io::{retry_on_intr, Errno, IoSlice, IoSliceMut};
@@ -65,10 +61,10 @@ where
     Ok(bytes / per)
 }
 
-pub(crate) fn send_msg<T>(stream: &IOStream, data: &[T], fds: &[BorrowedFd<'_>]) -> IoResult<usize>
-where
-    T: AllBitValuesSafe,
-{
+pub(crate) fn send_msg<T>(
+    stream: &IOStream, data: &[T], fds: &[BorrowedFd<'_>],
+) -> IoResult<usize>
+where T: AllBitValuesSafe {
     let byte_data = to_u8_slice(data);
 
     let flags = SendFlags::DONTWAIT;

@@ -1,11 +1,6 @@
-#![warn(clippy::pedantic)]
-//#![forbid(unsafe_code)]
-#![forbid(clippy::large_types_passed_by_value)]
-#![forbid(clippy::large_stack_frames)]
-
 use crate::basics::{to_u8_slice_mut, uninit_array, MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::Messenger;
-use crate::header::{get_msg_length, MessageHeader};
+use crate::header::{get_msg_nwords, MessageHeader};
 use crate::streams::{recv_msg, send_msg, IOStream};
 use arrayvec::ArrayVec;
 use rustix::fd::BorrowedFd;
@@ -38,7 +33,7 @@ impl<'a> InBuffer<'a> {
         debug_assert!(self.back <= self.data.len() && self.front <= self.back);
         let available = &self.data[self.front..self.back];
         // Determine the msg len from its header, if enough is there for a header:
-        let msg_len = get_msg_length(available)?;
+        let msg_len = get_msg_nwords(available)?;
         // Check if the whole message is available:
         let msg = available.get(0..msg_len)?;
         // must be &mut self because of this:
@@ -82,14 +77,15 @@ impl<'a> InBuffer<'a> {
         } else if self.front >= len // no overlap
             && (self.back > MAX_WORDS_OUT || COMPACT_SCHEME == CompactScheme::Eager)
         {
-            // we have to, or at least want to compact now, and can use memcpy because no overlap
-            // between source and destination:
+            // we have to, or at least want to (because eager) compact now, and can use memcpy
+            // because no overlap between source and destination:
             let (left, right) = self.data.split_at_mut(self.front);
             left[..len].copy_from_slice(&right[..len]);
         } else if self.back > MAX_WORDS_OUT {
             // we have to compact now, but there is an overlap, so use memmove:
             self.data.copy_within(self.front..self.back, 0);
         } else {
+            // don't compact at all
             debug_assert!(self.data[self.back..].len() >= MAX_WORDS_OUT);
             return;
         }
@@ -328,7 +324,7 @@ impl<'a> Messenger for OutBuffer<'a> {
     fn send_raw(
         &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u32],
     ) -> IoResult<usize> {
-        debug_assert_eq!(get_msg_length(raw_msg).unwrap(), raw_msg.len());
+        debug_assert_eq!(get_msg_nwords(raw_msg).unwrap(), raw_msg.len());
 
         self.add_fds(fds)?;
 
@@ -373,6 +369,8 @@ pub(crate) struct ExtendChunk<'a>(pub(self) &'a mut Chunk);
 
 impl<'a> ExtendChunk<'a> {
     #![allow(clippy::inline_always)]
+    #![allow(unsafe_code)]
+
     #[inline(always)]
     pub(crate) fn add_u32(&mut self, data: u32) { self.0.push(data); }
 

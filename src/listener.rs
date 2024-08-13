@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
 use std::env;
@@ -58,9 +57,7 @@ impl SocketListener {
     }
 
     #[allow(unused)]
-    pub(crate) fn drop_without_removes(mut self) {
-        self.do_removes = false;
-    }
+    pub(crate) fn drop_without_removes(mut self) { self.do_removes = false; }
 
     pub(crate) fn take_unix_listener(&mut self) -> UnixListener {
         self.unix_listener.take().unwrap()

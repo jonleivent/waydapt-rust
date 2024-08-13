@@ -1,29 +1,27 @@
-#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
 use crate::buffers::{InBuffer, OutBuffer};
 use crate::crate_traits::EventHandler;
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
-use crate::input_handler::Mediator;
+use crate::mediator::Mediator;
 use crate::postparse::ActiveInterfaces;
 use crate::protocol::Interface;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
-use std::fmt::{Debug, Error, Formatter};
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 
 #[derive(Debug)]
-pub(crate) struct Session<'a> {
+struct Session<'a> {
     in_buffers: [InBuffer<'a>; 2],
     out_buffers: [OutBuffer<'a>; 2],
-    mediator: Mediator<'a>,
+    mediator: Mediator<'a, InitInfo>,
     fds: [BorrowedFd<'a>; 2],
 }
 
 impl<'a> Session<'a> {
-    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo, streams: [&'a IOStream; 2]) -> Self {
+    fn new(init_info: &'a InitInfo, streams: [&'a IOStream; 2]) -> Self {
         let mut s = Self {
             in_buffers: streams.map(InBuffer::new),
             out_buffers: streams.map(OutBuffer::new),
@@ -82,26 +80,21 @@ impl<'a> EventHandler for Session<'a> {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-pub(crate) struct WaydaptSessionInitInfo {
-    pub(crate) ucred: rustix::net::UCred,
-    pub(crate) active_interfaces: &'static ActiveInterfaces,
-    pub(crate) options: &'static crate::setup::SharedOptions,
+#[derive(Debug)]
+struct InitInfo {
+    ucred: rustix::net::UCred,
+    active_interfaces: &'static ActiveInterfaces,
+    options: &'static crate::setup::SharedOptions,
 }
 
-impl Debug for WaydaptSessionInitInfo {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        f.write_str("WaydaptSessionInitInfo")
-    }
-}
-
-impl SessionInitInfo for WaydaptSessionInitInfo {
+impl SessionInitInfo for InitInfo {
     fn ucred(&self) -> rustix::net::UCred { self.ucred }
 
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces { self.active_interfaces }
 
     fn get_display(&self) -> &'static Interface<'static> { self.active_interfaces.get_display() }
+
+    fn get_debug_level(&self) -> u32 { self.options.debug_level }
 }
 
 // For errors that should kill off the process even if in multithreaded mode, call
@@ -130,7 +123,7 @@ pub(crate) fn client_session(
     // When would get_socket_peercred ever fail, given that we know the arg is correct?
     // Probably never.  Does it matter then how we handle it?:
     let ucred = get_socket_peercred(&client_stream).unwrap();
-    let init_info = WaydaptSessionInitInfo { ucred, active_interfaces, options };
+    let init_info = InitInfo { ucred, active_interfaces, options };
 
     // options.terminate can only be Some(duration) if options.fork_sessions is false, meaning we
     // are in multi-threaded mode - use it to conditionally set up a SessionTerminator that will
@@ -144,9 +137,9 @@ pub(crate) fn client_session(
 
     if let Err(e) = crate::event_loop::event_loop(&mut session) {
         match e.kind() {
-            ErrorKind::ConnectionReset => eprintln!("Connection reset for {ucred:?}"),
-            ErrorKind::ConnectionAborted => eprintln!("Connection aborted for {ucred:?}"),
-            _ => eprintln!("Unexpected session error: {e:?} for {ucred:?}"),
+            ErrorKind::ConnectionReset => eprintln!("Connection reset for {ucred:?}: {e:?}"),
+            ErrorKind::ConnectionAborted => eprintln!("Connection aborted for {ucred:?}: {e:?}"),
+            _ => eprintln!("Unexpected session error for {ucred:?}: {e:?}"),
         }
     }
 }

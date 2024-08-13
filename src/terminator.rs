@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
 use crate::multithread_exit::{multithread_exit, ExitCode};

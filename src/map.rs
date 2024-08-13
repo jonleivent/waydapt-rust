@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 #![allow(unused)]
 
 use crate::crate_traits::{ClientPeer, Peer, ServerPeer};
@@ -18,12 +17,12 @@ pub enum ObjectEntry {
 }
 
 #[derive(Debug)]
-pub(crate) struct WaylandObjectMap<P: Peer> {
+pub(crate) struct ObjectMap<P: Peer> {
     vect: Vec<ObjectEntry>,
     _pd: PhantomData<P>,
 }
 
-impl<P: Peer> WaylandObjectMap<P> {
+impl<P: Peer> ObjectMap<P> {
     pub(crate) fn new() -> Self {
         let mut s = Self { vect: Vec::new(), _pd: PhantomData };
         if !P::IS_SERVER {
@@ -33,11 +32,13 @@ impl<P: Peer> WaylandObjectMap<P> {
         s
     }
 
+    #[inline]
     pub(crate) fn try_lookup(&self, id: u32) -> Option<ObjectEntry> {
         let id = P::normalize_id(id);
         self.vect.get(id).copied()
     }
 
+    #[inline]
     pub(crate) fn lookup(&self, id: u32) -> Option<RInterface> {
         let id = P::normalize_id(id);
         if let Some(ObjectEntry::Live(interface)) = self.vect.get(id) {

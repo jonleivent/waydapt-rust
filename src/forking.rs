@@ -1,4 +1,4 @@
-#![warn(clippy::pedantic)]
+#![allow(unsafe_code)]
 
 use nix::sys::wait::{waitpid, WaitPidFlag};
 use nix::unistd::fork;

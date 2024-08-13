@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 #![allow(dead_code)]
 #![forbid(unsafe_code)]
 
@@ -167,7 +166,7 @@ impl<'a> DemarshalledMessage<'a> {
 
     #[cold]
     pub(crate) fn new(header: MessageHeader, msg_decl: RMessage, data: &'a [u32]) -> Self {
-        assert_eq!(header.len32(), data.len());
+        assert_eq!(header.msg_nwords(), data.len());
         #[allow(clippy::default_trait_access)]
         Self {
             msg_decl,

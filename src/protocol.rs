@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 #![allow(clippy::missing_panics_doc)]
 
 use crate::basics::NoDebug;
@@ -25,9 +24,7 @@ impl<'a> Protocol<'a> {
         self.interfaces.get(name).copied()
     }
 
-    pub fn is_active(&self) -> bool {
-        self.active.get().is_some()
-    }
+    pub fn is_active(&self) -> bool { self.active.get().is_some() }
 }
 
 impl<'a> fmt::Display for Protocol<'a> {
@@ -74,9 +71,7 @@ impl<'a> Interface<'a> {
         }
     }
 
-    pub fn version(&self) -> Option<&u32> {
-        self.limited_version.get()
-    }
+    pub fn version(&self) -> Option<&u32> { self.limited_version.get() }
 
     // owning fields are set during postparse first pass
     pub fn owning_protocol(&self) -> &Protocol<'a> {
@@ -88,13 +83,9 @@ impl<'a> Interface<'a> {
     }
 
     // TBD: mabye have these two panic with a suitable message if the opcode is out of range:
-    pub fn get_request(&self, opcode: usize) -> &Message<'a> {
-        self.requests[opcode]
-    }
+    pub fn get_request(&self, opcode: usize) -> &Message<'a> { self.requests[opcode] }
 
-    pub fn get_event(&self, opcode: usize) -> &Message<'a> {
-        self.events[opcode]
-    }
+    pub fn get_event(&self, opcode: usize) -> &Message<'a> { self.events[opcode] }
 
     pub(crate) fn get_request_by_name(&self, name: &str) -> Option<&Message<'a>> {
         self.requests.iter().find(|m| m.name == name).copied()
@@ -105,21 +96,13 @@ impl<'a> Interface<'a> {
     }
 
     pub fn get_message(&self, from_server: bool, opcode: usize) -> &Message<'a> {
-        if from_server {
-            self.get_event(opcode)
-        } else {
-            self.get_request(opcode)
-        }
+        if from_server { self.get_event(opcode) } else { self.get_request(opcode) }
     }
 
     // an interface is considered activated if it had its limited_version set during the third pass of postparse
-    pub fn is_active(&self) -> bool {
-        self.limited_version.get().is_some()
-    }
+    pub fn is_active(&self) -> bool { self.limited_version.get().is_some() }
 
-    pub fn same_as(&self, other: &Interface<'a>) -> bool {
-        std::ptr::eq(self, other)
-    }
+    pub fn same_as(&self, other: &Interface<'a>) -> bool { std::ptr::eq(self, other) }
 
     pub(crate) fn dump(&self, out: &mut impl Write) -> IoResult<()> {
         let parent = if let Some(parent_interface) = self.parent.get() {
@@ -193,17 +176,11 @@ impl<'a> Message<'a> {
         }
     }
 
-    pub fn get_name(&self) -> &str {
-        &self.name
-    }
+    pub fn get_name(&self) -> &str { &self.name }
 
-    pub fn is_active(&self) -> bool {
-        self.active.get().is_some()
-    }
+    pub fn is_active(&self) -> bool { self.active.get().is_some() }
 
-    pub fn get_args(&self) -> &[Arg] {
-        &self.args
-    }
+    pub fn get_args(&self) -> &[Arg] { &self.args }
 
     pub fn get_new_id_interface(&self) -> Option<&Interface<'a>> {
         self.new_id_interface.get().copied()

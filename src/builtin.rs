@@ -1,6 +1,3 @@
-#![warn(clippy::pedantic)]
-#![forbid(unsafe_code)]
-
 use crate::for_handlers::{AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo};
 
 // We must alter wl_registry::global events in order to either drop or version-limit the global

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-#![warn(clippy::pedantic)]
 #![allow(clippy::inline_always)]
+#![allow(unsafe_code)]
 
 use std::thread::panicking;
 

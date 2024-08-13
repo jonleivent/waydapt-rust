@@ -7,12 +7,10 @@ edition = "2021"
 
 [dependencies]
 arrayvec = "0.7.4"
-bumpalo = "3.16.0"
 getopts = "0.2.21"
 libc = "0.2.155"
 quick-xml = "0.31.0"
 smallvec = "1.13.2"
-static_assertions = "1.1.0"
 
 
 [dependencies.rustix]

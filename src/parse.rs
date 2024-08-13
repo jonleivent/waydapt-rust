@@ -1,6 +1,4 @@
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
-
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
 use crate::{basics::UnwindDo, crate_traits::Alloc};

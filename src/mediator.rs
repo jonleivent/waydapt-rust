@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
 use crate::basics::round4;
@@ -7,11 +6,10 @@ use crate::crate_traits::{ClientPeer, FdInput, Messenger, ServerPeer};
 #[allow(clippy::enum_glob_use)]
 use crate::for_handlers::{MessageHandlerResult::*, RInterface, SessionInfo, SessionInitInfo};
 use crate::header::MessageHeader;
-use crate::map::{WaylandObjectMap, WL_SERVER_ID_START};
+use crate::map::{ObjectMap, WL_SERVER_ID_START};
 use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
 use crate::protocol::{Message, Type};
-use crate::session::WaydaptSessionInitInfo;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
@@ -20,26 +18,24 @@ use std::os::unix::io::OwnedFd;
 
 // TBD: where should this go?
 impl FdInput for VecDeque<OwnedFd> {
-    fn try_take_fd(&mut self) -> Option<OwnedFd> {
-        self.pop_front()
-    }
+    #[inline]
+    fn try_take_fd(&mut self) -> Option<OwnedFd> { self.pop_front() }
 
-    fn drain(&mut self, num: usize) -> impl Iterator<Item = OwnedFd> {
-        self.drain(..num)
-    }
+    #[inline]
+    fn drain(&mut self, num: usize) -> impl Iterator<Item = OwnedFd> { self.drain(..num) }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug)]
 pub(crate) struct IdMap {
-    pub(crate) client_id_map: WaylandObjectMap<ClientPeer>,
-    pub(crate) server_id_map: WaylandObjectMap<ServerPeer>,
+    pub(crate) client_id_map: ObjectMap<ClientPeer>,
+    pub(crate) server_id_map: ObjectMap<ServerPeer>,
 }
 
 impl IdMap {
     pub(crate) fn new() -> Self {
-        Self { client_id_map: WaylandObjectMap::new(), server_id_map: WaylandObjectMap::new() }
+        Self { client_id_map: ObjectMap::new(), server_id_map: ObjectMap::new() }
     }
 
     pub(crate) fn try_lookup(&self, id: u32) -> Option<RInterface> {
@@ -50,6 +46,7 @@ impl IdMap {
         }
     }
 
+    #[inline]
     pub(crate) fn lookup(&self, id: u32) -> RInterface {
         let i = self.try_lookup(id);
         i.unwrap_or_else(|| panic!("No interface for object id {id}"))
@@ -73,45 +70,47 @@ impl IdMap {
 }
 
 #[derive(Debug)]
-pub(crate) struct Mediator<'a> {
+pub(crate) struct Mediator<'a, S: SessionInitInfo> {
     id_map: IdMap,
-    init_info: &'a WaydaptSessionInitInfo,
+    init_info: &'a S,
 }
 
-impl<'a> SessionInitInfo for Mediator<'a> {
-    fn ucred(&self) -> rustix::net::UCred {
-        self.init_info.ucred()
-    }
+impl<'a, S: SessionInitInfo> SessionInitInfo for Mediator<'a, S> {
+    #![allow(clippy::inline_always)]
 
+    #[inline(always)]
+    fn ucred(&self) -> rustix::net::UCred { self.init_info.ucred() }
+
+    #[inline(always)]
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
         self.init_info.get_active_interfaces()
     }
 
-    fn get_display(&self) -> RInterface {
-        self.init_info.get_display()
-    }
+    #[inline(always)]
+    fn get_display(&self) -> RInterface { self.init_info.get_display() }
+
+    #[inline(always)]
+    fn get_debug_level(&self) -> u32 { self.init_info.get_debug_level() }
 }
 
-impl<'a> SessionInfo for Mediator<'a> {
-    fn try_lookup(&self, id: u32) -> Option<RInterface> {
-        self.id_map.try_lookup(id)
-    }
+impl<'a, S: SessionInitInfo> SessionInfo for Mediator<'a, S> {
+    #![allow(clippy::inline_always)]
 
-    fn lookup(&self, id: u32) -> RInterface {
-        self.id_map.lookup(id)
-    }
+    #[inline(always)]
+    fn try_lookup(&self, id: u32) -> Option<RInterface> { self.id_map.try_lookup(id) }
 
-    fn add(&mut self, id: u32, interface: RInterface) {
-        self.id_map.add(id, interface);
-    }
+    #[inline(always)]
+    fn lookup(&self, id: u32) -> RInterface { self.id_map.lookup(id) }
 
-    fn delete(&mut self, id: u32) {
-        self.id_map.delete(id);
-    }
+    #[inline(always)]
+    fn add(&mut self, id: u32, interface: RInterface) { self.id_map.add(id, interface); }
+
+    #[inline(always)]
+    fn delete(&mut self, id: u32) { self.id_map.delete(id); }
 }
 
-impl<'a> Mediator<'a> {
-    pub(crate) fn new(init_info: &'a WaydaptSessionInitInfo) -> Self {
+impl<'a, S: SessionInitInfo> Mediator<'a, S> {
+    pub(crate) fn new(init_info: &'a S) -> Self {
         let mut s = Self { id_map: IdMap::new(), init_info };
         // the id map always has the wl_display interface at id 1:
         s.id_map.add(1, init_info.get_display());
@@ -130,20 +129,20 @@ impl<'a> Mediator<'a> {
             let mut dmsg = DemarshalledMessage::new(header, msg_decl, in_msg);
             dmsg.demarshal(in_fds, self);
             self.debug_in(header, msg_decl, &dmsg, from_server);
-            for (_mod_name, h) in handlers {
+            for (mod_name, h) in handlers {
                 // since we have the mod name, we can debug each h call along with their result - TBD
                 match h(&mut dmsg, self) {
                     Next => continue,
                     Send => break,
                     Drop => {
-                        self.debug_drop(header, msg_decl, from_server);
+                        self.debug_drop(header, msg_decl, from_server, mod_name);
                         return Ok(());
                     }
                 }
             }
             self.debug_out(header, msg_decl, &dmsg, from_server);
             dmsg.marshal(out)?;
-        } else if self.init_info.options.debug_level == 0 {
+        } else if self.init_info.get_debug_level() == 0 {
             // Fast track, no demarshalling, although maybe just a little parsing to find the new_id
             // value if it is present:
             if let Some(interface) = msg_decl.new_id_interface.get() {
@@ -183,30 +182,38 @@ impl<'a> Mediator<'a> {
 }
 
 mod debug {
+    use crate::for_handlers::SessionInitInfo;
+
     use super::{DemarshalledMessage, Mediator, Message, MessageHeader};
 
-    impl<'a> Mediator<'a> {
+    impl<'a, S: SessionInitInfo> Mediator<'a, S> {
         fn eprint_flow_unified(&self, from_server: bool) {
             if from_server {
-                eprint!("server->waydapt->client[{}] ", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!(
+                    "server->waydapt->client[{}] ",
+                    self.init_info.ucred().pid.as_raw_nonzero()
+                );
             } else {
-                eprint!("client[{}]->waydapt->server ", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!(
+                    "client[{}]->waydapt->server ",
+                    self.init_info.ucred().pid.as_raw_nonzero()
+                );
             }
         }
 
         fn eprint_flow_in(&self, from_server: bool) {
             if from_server {
-                eprint!("server->waydapt[{}] ", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("server->waydapt[{}] ", self.init_info.ucred().pid.as_raw_nonzero());
             } else {
-                eprint!("client[{}]->waydapt ", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("client[{}]->waydapt ", self.init_info.ucred().pid.as_raw_nonzero());
             }
         }
 
         fn eprint_flow_out(&self, from_server: bool) {
             if from_server {
-                eprint!("waydapt->client[{}] ", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("waydapt->client[{}] ", self.init_info.ucred().pid.as_raw_nonzero());
             } else {
-                eprint!("waydapt[{}]->server ", self.init_info.ucred.pid.as_raw_nonzero());
+                eprint!("waydapt[{}]->server ", self.init_info.ucred().pid.as_raw_nonzero());
             }
         }
 
@@ -214,7 +221,7 @@ mod debug {
             &self, header: MessageHeader, msg_decl: &Message, dmsg: &DemarshalledMessage,
             from_server: bool,
         ) {
-            if match self.init_info.options.debug_level {
+            if match self.init_info.get_debug_level() {
                 1 => true,
                 2 => !from_server,
                 3 => from_server,
@@ -233,7 +240,7 @@ mod debug {
             &self, header: MessageHeader, msg_decl: &Message, dmsg: &DemarshalledMessage,
             from_server: bool,
         ) {
-            if match self.init_info.options.debug_level {
+            if match self.init_info.get_debug_level() {
                 1 => true,
                 2 => from_server,
                 3 => !from_server,
@@ -253,7 +260,7 @@ mod debug {
             &self, header: MessageHeader, msg_decl: &Message, dmsg: &DemarshalledMessage,
             from_server: bool,
         ) {
-            if self.init_info.options.debug_level != 0 {
+            if self.init_info.get_debug_level() != 0 {
                 debug_print(
                     header,
                     msg_decl,
@@ -264,14 +271,14 @@ mod debug {
         }
 
         pub(super) fn debug_drop(
-            &self, header: MessageHeader, msg_decl: &Message, from_server: bool,
+            &self, header: MessageHeader, msg_decl: &Message, from_server: bool, mod_name: &str,
         ) {
-            if self.init_info.options.debug_level != 0 {
+            if self.init_info.get_debug_level() != 0 {
                 debug_print(
                     header,
                     msg_decl,
                     || self.eprint_flow_out(from_server),
-                    || eprint!("dropped!"),
+                    || eprint!("dropped by {mod_name}!"),
                 );
             }
         }

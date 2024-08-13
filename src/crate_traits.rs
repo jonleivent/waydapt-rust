@@ -1,4 +1,4 @@
-#![warn(clippy::pedantic)]
+#![allow(clippy::inline_always)]
 
 use rustix::event::epoll::EventFlags;
 use std::io::Result as IoResult;
@@ -25,6 +25,7 @@ pub(crate) struct ClientPeer;
 impl Peer for ClientPeer {
     const IS_SERVER: bool = false;
 
+    #[inline(always)]
     fn normalize_id(id: u32) -> usize {
         assert!(id < WL_SERVER_ID_START, "Wrong side id");
         id as usize
@@ -37,6 +38,7 @@ pub(crate) struct ServerPeer;
 impl Peer for ServerPeer {
     const IS_SERVER: bool = true;
 
+    #[inline(always)]
     fn normalize_id(id: u32) -> usize {
         assert!(id >= WL_SERVER_ID_START, "Wrong side id");
         (id - WL_SERVER_ID_START) as usize
@@ -80,4 +82,5 @@ pub(crate) trait EventHandler {
 // ImplAsBytes should only be implemented for types that are implemented as bytes without
 // translation, and without any possible unsafe bit values - such as the primitive numeric types
 #[allow(clippy::missing_safety_doc)]
+#[allow(unsafe_code)]
 pub(crate) unsafe trait AllBitValuesSafe {}

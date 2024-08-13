@@ -1,11 +1,8 @@
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
-
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
 use crate::basics::{UnwindDo, LEAKER};
 use crate::crate_traits::Alloc;
-use bumpalo::Bump;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,6 +11,7 @@ use std::path::PathBuf;
 
 type ActiveInterfaceMap<'a> = HashMap<&'a str, &'a Interface<'a>>;
 
+#[derive(Debug)]
 pub struct ActiveInterfacesA<'a> {
     map: ActiveInterfaceMap<'a>,
     display: &'a Interface<'a>, // wd_display interface must always be active
@@ -23,19 +21,13 @@ pub type ActiveInterfaces = ActiveInterfacesA<'static>;
 type InterfaceMap<'a> = HashMap<&'a str, Vec<&'a Interface<'a>>>;
 type AllProtocols<'a> = [&'a Protocol<'a>];
 
-impl Alloc for Bump {
-    fn alloc<T>(&self, it: T) -> &mut T {
-        self.alloc(it)
-    }
-}
-
 pub(crate) fn active_interfaces(
     protocol_filenames: impl IntoIterator<Item = PathBuf>, globals_filename: &str,
     allow_missing: bool,
 ) -> &'static ActiveInterfaces {
     static ACTIVE_INTERFACES: OnceLock<&ActiveInterfaces> = OnceLock::new();
     ACTIVE_INTERFACES.get_or_init(|| {
-        let alloc = LEAKER.alloc(Bump::new());
+        let alloc = &LEAKER;
         let mut all_protocols: Vec<&'static Protocol<'static>> = Vec::new();
         let mut maybe_display = None; // wl_display must exist
         for ref protocol_filename in protocol_filenames {
@@ -110,9 +102,7 @@ impl<'a> ActiveInterfacesA<'a> {
         }
         iface
     }
-    pub fn get_display(&self) -> &'a Interface<'a> {
-        self.display
-    }
+    pub fn get_display(&self) -> &'a Interface<'a> { self.display }
 
     pub fn iter(&self) -> impl Iterator<Item = &Interface<'a>> {
         let i = self.map.values().copied();
@@ -209,7 +199,9 @@ fn get_globals_limits(
             None => {
                 if let Some(iface) = protocols.iter().find_map(|p| p.find_interface(name)) {
                     let parent_name = &iface.parent.get().unwrap().name;
-                    panic!("Non-global interface {name} (parent {parent_name}) in global limits file {filename} line {n}");
+                    panic!(
+                        "Non-global interface {name} (parent {parent_name}) in global limits file {filename} line {n}"
+                    );
                 } else if allow_missing {
                     eprintln!("Interface {name} not found: global limits file {filename} line {n}");
                 } else {
@@ -319,8 +311,7 @@ fn global_limits(filename: &str) -> impl Iterator<Item = (usize, String, u32)> +
 }
 
 impl<'a, LI> Iterator for GlobalLimits<'a, LI>
-where
-    LI: Iterator<Item = (usize, IoResult<String>)>,
+where LI: Iterator<Item = (usize, IoResult<String>)>
 {
     type Item = (usize, String, u32);
 
@@ -334,13 +325,19 @@ where
                 continue;
             }; // skip comments
             let Some(version_field) = fields.next() else {
-                panic!("Missing version limit field for global {name} in global limits file {filename} line {n}")
+                panic!(
+                    "Missing version limit field for global {name} in global limits file {filename} line {n}"
+                )
             };
             let rest: Vec<_> = fields.collect();
-            assert!(rest.is_empty(),
-                "Extraneous fields {rest:?} for global {name} in global limits file {filename} line {n}");
+            assert!(
+                rest.is_empty(),
+                "Extraneous fields {rest:?} for global {name} in global limits file {filename} line {n}"
+            );
             let Ok(version_limit) = version_field.parse() else {
-                panic!("Malformed version limit field \"{version_field}\" for {name} in global limits file {filename} line {n}")
+                panic!(
+                    "Malformed version limit field \"{version_field}\" for {name} in global limits file {filename} line {n}"
+                )
             };
             // make version_limit == 0 act like unlimited
             let version_limit = if version_limit > 0 { version_limit } else { u32::MAX };

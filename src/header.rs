@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::basics::MAX_BYTES_OUT;
 
@@ -28,13 +27,12 @@ impl MessageHeader {
         [word1, word2]
     }
 
-    pub(crate) fn len32(&self) -> usize {
-        (self.size as usize + 3) / 4
-    }
+    #[inline]
+    pub(crate) fn msg_nwords(self) -> usize { (self.size as usize + 3) / 4 }
 }
 
 #[inline]
-pub(crate) fn get_msg_length(header: &[u32]) -> Option<usize> {
+pub(crate) fn get_msg_nwords(header: &[u32]) -> Option<usize> {
     let word_2 = header.get(1)?;
     Some(((word_2 >> 16) as usize + 3) / 4)
 }

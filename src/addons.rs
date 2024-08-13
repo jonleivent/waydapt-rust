@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 use crate::{for_handlers::AddHandler, postparse::ActiveInterfaces};
 use std::collections::HashMap;
 
@@ -109,19 +107,6 @@ mod safeclip {
 
     pub(crate) const INIT_HANDLER: InitHandlersFun = init_handler;
 
-    // Ideally, we could have a per-thread (per-session) buffer for concatenating where the prefix
-    // is already present, and which gets borrowed by the Cow in the ArgData, so that there are no
-    // allocations or frees.  A very elaborate alternative would be to have an additional field with
-    // the Cow which is a Option closure that, if present, is called on the Cow and the output
-    // buffer, and writes to the output buffer.  Actually, not a closure, but an object with at
-    // least two methods (trait?): len and output.  The object should be stateless - may be zero
-    // sized.  Box<dyn T> is fine for that, right?  Also, the output method would have to be very
-    // low-level, like OutBuffer::push_array in terms of directing output to chunks, which would be
-    // very difficult.  An alternative is to switch to 2*4K output chunks, so that no message needs
-    // to be split over chunks, so can have simple output routines.  Or, alter push_arrray so that
-    // it is based on a lower level push_slice, which does not write the length.  We would then also
-    // need a push_zero_term.  The object, instead of being a trait, can be a static struct that has
-    // two closure or funpointer fields.
     fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and add PREFIX to the front of it:
         let msg_size = msg.get_size();

@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 pub use crate::message::ArgData;
 pub use crate::postparse::ActiveInterfaces;
@@ -21,6 +20,7 @@ pub trait SessionInitInfo {
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces;
     // TBD: get method for active interfaces, etc.
     fn get_display(&self) -> RInterface; // wl_display
+    fn get_debug_level(&self) -> u32;
 }
 
 pub type RInterface = &'static Interface<'static>;
