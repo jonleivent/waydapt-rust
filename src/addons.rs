@@ -22,6 +22,7 @@ mod safeclip {
     };
 
     use crate::{
+        basics::MAX_BYTES_OUT,
         for_handlers::{AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo},
         postparse::ActiveInterfaces,
         protocol::{Message, Type},
@@ -123,12 +124,24 @@ mod safeclip {
     // two closure or funpointer fields.
     fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and add PREFIX to the front of it:
+        let msg_size = msg.get_size();
+        let prefix = PREFIX.get().unwrap();
         let msg_decl = msg.get_decl();
         for (i, arg) in msg_decl.args.iter().enumerate() {
             if let ArgData::String(s) = msg.get_arg(i) {
                 if arg.name == "mime_type" || arg.name == "title" {
-                    let fixed =
-                        CString::new([PREFIX.get().unwrap(), s.to_bytes()].concat()).unwrap();
+                    let mut sb = s.to_bytes();
+                    if msg_size + prefix.len() > MAX_BYTES_OUT {
+                        // The msg would be too long with the prefix added, so truncate the suffix.
+                        // This is probably a set_title request, so such truncation is not a big
+                        // deal.  If this is a mime-type message, then the truncation might be a
+                        // problem, but mime-type strings are very unlikely to be long enough to
+                        // cause a problem.  If one gets truncated, it will likely just result in a
+                        // copy-paste mismatch, disallowing the copy.
+                        let trunc = sb.len() - prefix.len();
+                        sb = &sb[..trunc];
+                    }
+                    let fixed = CString::new([prefix, sb].concat()).unwrap();
                     msg.set_arg(i, ArgData::String(fixed.into()));
                     return MessageHandlerResult::Next;
                 }

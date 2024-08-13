@@ -13,6 +13,7 @@ pub trait MessageInfo<'a> {
     fn get_decl(&self) -> &'static Message<'static>;
     fn get_object_id(&self) -> u32;
     fn set_arg(&mut self, index: usize, a: ArgData<'a>);
+    fn get_size(&self) -> usize;
 }
 
 pub trait SessionInitInfo {

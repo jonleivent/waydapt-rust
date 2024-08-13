@@ -75,33 +75,26 @@ impl<'a> InBuffer<'a> {
         // of dealing with string or array message args that wrap.
         let len = self.back - self.front;
         debug_assert!(len <= MAX_WORDS_OUT);
-        if len == 0 {
-            // No compact needed, just reset front and back:
-            self.back = 0;
-            self.front = 0;
-            return;
-        }
         // Compacting more often than absolutely necessary has a cost, but it may improve CPU
         // cache friendliness.
-        let threshold_reached = match COMPACT_SCHEME {
-            // Eager means compact as soon as there is room to do so without overlap between the
-            // region of msgs and where they are being compacted to (which is the front of the
-            // chunk):
-            CompactScheme::Eager => self.front >= len,
-            // Lazy means compact only when absolutely necessary, which means when the space left
-            // after back isn't enough to hold a max-sized msg:
-            CompactScheme::Lazy => self.back > MAX_WORDS_OUT,
-        };
-        if threshold_reached {
-            // the total current payload fits below front, so move it there.  We can use the
-            // memcpy-based copy_from_slice instead of the memmove-based copy_within because of
-            // the extra room.  Doing so may get us some vectorization speedup.
+        if len == 0 {
+            // nothing to move, just reset front and back
+        } else if self.front >= len // no overlap
+            && (self.back > MAX_WORDS_OUT || COMPACT_SCHEME == CompactScheme::Eager)
+        {
+            // we have to, or at least want to compact now, and can use memcpy because no overlap
+            // between source and destination:
             let (left, right) = self.data.split_at_mut(self.front);
             left[..len].copy_from_slice(&right[..len]);
-            self.back = len;
-            self.front = 0;
+        } else if self.back > MAX_WORDS_OUT {
+            // we have to compact now, but there is an overlap, so use memmove:
+            self.data.copy_within(self.front..self.back, 0);
+        } else {
+            debug_assert!(self.data[self.back..].len() >= MAX_WORDS_OUT);
+            return;
         }
-        debug_assert!(self.data[self.back..].len() >= MAX_WORDS_OUT);
+        self.back = len;
+        self.front = 0;
     }
 }
 
@@ -310,7 +303,7 @@ impl<'a> Messenger for OutBuffer<'a> {
         let mut header = msgfun(ExtendChunk(end_chunk));
         let new_len = end_chunk.len();
         let len = new_len - orig_len;
-        debug_assert!((2..=MAX_WORDS_OUT).contains(&len));
+        assert!((2..=MAX_WORDS_OUT).contains(&len));
         // fix the header.size field to the now known length and write the header:
         {
             #![allow(clippy::cast_possible_truncation)]
@@ -361,6 +354,7 @@ impl<'a> Messenger for OutBuffer<'a> {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum CompactScheme {
     Eager,
     Lazy,

@@ -77,9 +77,7 @@ impl<'a> DemarshalledMessage<'a> {
         (nwords, c)
     }
 
-    fn add_string(&mut self, data: &'a [u32]) -> usize {
-        self.add_string_internal(data).0
-    }
+    fn add_string(&mut self, data: &'a [u32]) -> usize { self.add_string_internal(data).0 }
 
     fn add_array(&mut self, data: &'a [u32]) -> usize {
         let len = data[0] as usize;
@@ -296,13 +294,9 @@ mod debug {
 }
 
 impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
-    fn get_num_args(&self) -> usize {
-        self.args.len()
-    }
+    fn get_num_args(&self) -> usize { self.args.len() }
 
-    fn get_arg(&self, index: usize) -> &ArgData<'a> {
-        &self.args[index]
-    }
+    fn get_arg(&self, index: usize) -> &ArgData<'a> { &self.args[index] }
 
     fn get_arg_mut(&mut self, index: usize) -> &mut ArgData<'a> {
         self.maybe_modified = true;
@@ -316,13 +310,9 @@ impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
         self.args.as_mut_slice()
     }
 
-    fn get_decl(&self) -> &'static Message<'static> {
-        self.msg_decl
-    }
+    fn get_decl(&self) -> &'static Message<'static> { self.msg_decl }
 
-    fn get_object_id(&self) -> u32 {
-        self.header.object_id
-    }
+    fn get_object_id(&self) -> u32 { self.header.object_id }
 
     fn set_arg(&mut self, index: usize, a: ArgData<'a>) {
         use std::mem::discriminant as discr;
@@ -332,4 +322,6 @@ impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
         self.maybe_modified = true;
         *sa = a;
     }
+
+    fn get_size(&self) -> usize { self.header.size as usize }
 }
