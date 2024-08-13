@@ -11,6 +11,8 @@ pub(crate) struct SocketListener {
     socket_path: PathBuf,
     unix_listener: UnixListener,
     lock_path: PathBuf,
+    #[allow(unused)]
+    lock_file: File,
     do_removes: bool,
 }
 
@@ -49,12 +51,12 @@ impl SocketListener {
             xdg_runtime_dir.join(display_name)
         };
         let lock_path = socket_path.with_extension("lock");
-        lock_file(&lock_path);
+        let lock_file = lock_file(&lock_path);
         if socket_path.try_exists().unwrap() {
             remove_file(&socket_path).unwrap();
         }
         let unix_listener = UnixListener::bind(&socket_path).unwrap();
-        Self { socket_path, unix_listener, lock_path, do_removes: true }
+        Self { socket_path, unix_listener, lock_path, lock_file, do_removes: true }
     }
 
     pub(crate) fn drop_without_removes(mut self) { self.do_removes = false; }
@@ -87,7 +89,7 @@ fn file_still_at_path(file: &File, path: &PathBuf) -> bool {
     }
 }
 
-fn lock_file(path: &PathBuf) {
+fn lock_file(path: &PathBuf) -> File {
     // panics if it can't lock
     use rustix::fs::{flock, FlockOperation};
     use std::os::unix::fs::OpenOptionsExt;
@@ -100,7 +102,8 @@ fn lock_file(path: &PathBuf) {
             .mode(0o660)
             .open(path)
             .unwrap();
-        flock(&lock_file, FlockOperation::NonBlockingLockExclusive).unwrap();
+        flock(&lock_file, FlockOperation::NonBlockingLockExclusive)
+            .unwrap_or_else(|_| panic!("Lock file {path:?} is already locked"));
         // There is a potential data race between the above file open and flock vs. the
         // remove_file call in SocketListener::drop.  The remove_file is done on the lock path
         // while the flock is held.  However, if server A starts up and gets to the above open
@@ -109,7 +112,7 @@ fn lock_file(path: &PathBuf) {
         // the socket vs. subsequent server startups.  So loop to make sure that we flock the
         // same file that we opened/created.
         if file_still_at_path(&lock_file, path) {
-            return;
+            return lock_file;
         }
     }
 }

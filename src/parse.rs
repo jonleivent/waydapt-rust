@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #[allow(clippy::wildcard_imports)]
+// Adapted from wayland-scanner/parse.rs, keeping only what we need
 use super::protocol::*;
 use crate::{basics::UnwindDo, crate_traits::Alloc};
 use std::{
