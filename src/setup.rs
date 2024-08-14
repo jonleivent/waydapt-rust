@@ -15,6 +15,10 @@ use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use shadow_rs::shadow;
+
+shadow!(build);
+
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
     pub(crate) fork_sessions: bool,
@@ -37,11 +41,16 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     }
 
     if matches.opt_present("v") {
-	use git_version::git_version;
-	// maybe replace this with a build script that writes an include_str! file, so that it can
-	// contain anything, include date and time
-	eprintln!("{program} git version {}", git_version!());
-	return ExitCode::SUCCESS;
+        // maybe replace this with a build script that writes an include_str! file, so that it can
+        // contain anything, include date and time
+        eprintln!(
+            "{program} git commit {}\n{}built at {} using {}",
+            build::SHORT_COMMIT,
+            build::GIT_STATUS_FILE,
+            build::BUILD_TIME,
+            build::RUST_VERSION
+        );
+        return ExitCode::SUCCESS;
     }
 
     // gather options that can be used elsewhere:
@@ -209,7 +218,7 @@ fn get_options() -> Options {
         "terminate after last client and no others for secs (can't be used with -c)",
         "SECS",
     );
-    opts.optflag("v","version","Show version info and exit");
+    opts.optflag("v", "version", "Show version info and exit");
     opts.optflag("z", "daemonize", "daemonize waydapt when its socket is ready");
     opts
 }
