@@ -41,15 +41,7 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     }
 
     if matches.opt_present("v") {
-        // maybe replace this with a build script that writes an include_str! file, so that it can
-        // contain anything, include date and time
-        eprintln!(
-            "{program} git commit {}\n{}built at {} using {}",
-            build::SHORT_COMMIT,
-            build::GIT_STATUS_FILE,
-            build::BUILD_TIME,
-            build::RUST_VERSION
-        );
+        eprintln!("{program} {}\n{}", build::VERSION, build::GIT_STATUS_FILE);
         return ExitCode::SUCCESS;
     }
 
