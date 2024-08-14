@@ -40,6 +40,14 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if matches.opt_present("l") {
+        eprint!("Available addon modules: ");
+        for m in init_handlers.keys() {
+            eprint!("{m} ");
+        }
+        eprintln!();
+    }
+
     if matches.opt_present("v") {
         eprintln!("{program} {}\n{}", build::VERSION, build::GIT_STATUS_FILE);
         return ExitCode::SUCCESS;
@@ -195,6 +203,7 @@ fn get_options() -> Options {
         "FILE",
     );
     opts.optflag("h", "help", "print this help");
+    opts.optflag("l", "list", "list available addon modules");
     opts.optflag("m", "allowmissing", "allow global entries that don't appear in protocol files");
     opts.optopt("o", "output", "dump processed protocol and handler info to file", "FILE");
     opts.optmulti("p", "protofile", "a protocol XML file (can appear multiple times)", "FILE");
