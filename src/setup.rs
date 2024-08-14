@@ -36,6 +36,14 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if matches.opt_present("v") {
+	use git_version::git_version;
+	// maybe replace this with a build script that writes an include_str! file, so that it can
+	// contain anything, include date and time
+	eprintln!("{program} git version {}", git_version!());
+	return ExitCode::SUCCESS;
+    }
+
     // gather options that can be used elsewhere:
     let options = SharedOptions::new(&matches);
 
@@ -176,7 +184,7 @@ fn get_options() -> Options {
         "file descriptor for waydapt to unlock when its socket is ready",
         "FILE-DESCRIPTOR",
     );
-    opts.optflag("c", "childprocs", "make child sessions processes instead of threads");
+    opts.optflag("c", "childprocs", "make client sessions child processes instead of threads");
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
     opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
     opts.optopt(
@@ -201,6 +209,7 @@ fn get_options() -> Options {
         "terminate after last client and no others for secs (can't be used with -c)",
         "SECS",
     );
+    opts.optflag("v","version","Show version info and exit");
     opts.optflag("z", "daemonize", "daemonize waydapt when its socket is ready");
     opts
 }

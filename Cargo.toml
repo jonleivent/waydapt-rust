@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 arrayvec = "0.7.4"
 getopts = "0.2.21"
+git-version = "0.3.9"
 libc = "0.2.155"
 quick-xml = "0.31.0"
 smallvec = "1.13.2"

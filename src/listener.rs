@@ -12,7 +12,7 @@ pub(crate) struct SocketListener {
     unix_listener: UnixListener,
     lock_path: PathBuf,
     #[allow(unused)]
-    lock_file: File,
+    lock_file: File, // own this so that it drops (and so unlocks) with us
     do_removes: bool,
 }
 
