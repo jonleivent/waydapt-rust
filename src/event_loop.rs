@@ -47,3 +47,22 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()>
         events.clear(); // may not be needed
     }
 }
+
+// Note that although we use edge triggering (ET), the flags are level triggered.  Whenever an input
+// event is triggered (when available input goes up from 0), unless the output kernel socket buffer
+// is full at that point, we will see both IN and OUT flags for the event.  This causes us to waste
+// a little time trying to resend the last send if it failed (because there wasn't enough room).
+// But it is a very small amount of time we waste: almost all cases when we receive IN, we have no
+// output to send.  The only time we would is if the previous sends were blocked because the kernel
+// buffer was too full - and that would probably only happen if the peer was asleep or something.
+//
+// It would have been more beneficial if epoll::wait gave us the amount of data available in the
+// event.  Well, it would need 2 amounts, one for input and one for output.  But it doesn't.
+//
+// The reason we need ET for OUT is that we don't want to be repeatedly given OUT events by
+// epoll::wait when there is not enough space in the kernel socket buffer for us to send a complete
+// chunk AND that space isn't changing.  Making it ET will mean we are only notified with an OUT
+// event when the space is changing.
+//
+// There might not be any benefit for ET on the IN side.  We consume inputs in 4K chunks, but we do
+// so repeatedly until all input is exhausted before returning to epoll::wait.

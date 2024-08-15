@@ -63,6 +63,15 @@ impl<'a> InBuffer<'a> {
         Ok(amount_read)
     }
 
+    // Compaction that is more than a no-op is rare.  It requies that we did not consume the
+    // previous input completely before receiving more.  Because we consume all complete messages
+    // before requesting more input from the kernel socket, the only way we would not have consumed
+    // the previous input is if the last message was only partially received.  And that is rare
+    // because Wayland clients and servers use all-or-nothing sends of chunks, so only messages that
+    // span chunks can be partially received.  Since a Wayland chunk is 4K, and messages are on the
+    // order of 16 bytes, only about half a percent of messages could be subject to being partially
+    // received.  Even then, the no overlap case is much more likely than the overlap case below
+    // because of the small message sizes relative to the chunk size.
     fn compact(&mut self) {
         // Doing a compaction ensures that self.data[self.back..] is big enough to hold a max-sized
         // message, which is MAX_WORDS_OUT.  We don't use a ring buffer (like C libwayland) because

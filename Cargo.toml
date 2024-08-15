@@ -32,7 +32,12 @@ features = [
     "process"
 ]
 
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
 [profile.small]
+codegen-units = 1
 inherits = "release"
 opt-level = "z"
 strip = true
