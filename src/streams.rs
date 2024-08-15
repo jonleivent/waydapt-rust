@@ -84,6 +84,10 @@ where T: AllBitValuesSafe {
     };
     match result {
         Ok(bytes) => {
+            // We are using all-or-nothing sends - but do we need to?  The code in flush_first_chunk
+            // assumes it in order to simplify chunk management.  If we didn't send all-or-nothing,
+            // then we would have to deal with partial chunk draining at the very least.  I think we
+            // have to use all-or-nothing sends because of the MAX_FDS_OUT vs. fd starvation issue.
             assert_eq!(bytes, byte_data.len());
             let per = size_of::<T>();
             Ok(bytes / per)
