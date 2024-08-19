@@ -59,6 +59,7 @@ impl SocketListener {
         Self { socket_path, unix_listener, lock_path, lock_file, do_removes: true }
     }
 
+    #[allow(unused)]
     pub(crate) fn drop_without_removes(mut self) { self.do_removes = false; }
 }
 

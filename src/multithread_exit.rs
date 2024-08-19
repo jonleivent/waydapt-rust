@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-pub(crate) use std::process::ExitCode;
+use std::process::ExitCode;
 use std::sync::{mpsc::sync_channel, mpsc::SyncSender, OnceLock};
 
 static TX_TO_MAIN: OnceLock<SyncSender<ExitCode>> = OnceLock::new();

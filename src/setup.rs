@@ -2,26 +2,33 @@ use crate::addons::IHMap;
 use crate::basics::Leaker;
 use crate::crate_traits::Alloc;
 use crate::for_handlers::SessionInitHandler;
+#[cfg(feature = "forking")]
 use crate::forking::{daemonize, double_fork, ForkResult};
 use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
+#[cfg(feature = "cleanup")]
 use crate::multithread_exit::{multithread_exit, multithread_exit_handler, ExitCode};
 use crate::postparse::{active_interfaces, ActiveInterfaces};
 use crate::session::client_session;
 use getopts::{Matches, Options, ParsingStyle};
+#[cfg(feature = "gitver")]
+use shadow_rs::shadow;
 use std::collections::VecDeque;
 use std::env::Args;
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::process::ExitCode;
+#[cfg(feature = "terminator")]
 use std::time::Duration;
 
-use shadow_rs::shadow;
-
+#[cfg(feature = "gitver")]
 shadow!(build);
 
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
+    #[cfg(feature = "forking")]
     pub(crate) fork_sessions: bool,
+    #[cfg(feature = "terminator")]
     pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
@@ -49,6 +56,7 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     }
 
     if matches.opt_present("v") {
+        #[cfg(feature = "gitver")]
         eprintln!("{program} {}\n{}", build::VERSION, build::GIT_STATUS_FILE);
         return ExitCode::SUCCESS;
     }
@@ -69,10 +77,13 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     // If we're going to fork client sessions, then we don't need any special multi-threaded
     // exit magic (to enable other threads to end the process in an orderly fashion, with
     // destructors).  Otherwise, we do:
+    #[cfg(feature = "forking")]
     if options.fork_sessions {
         accept(); // accept_clients in this thread
-        ExitCode::SUCCESS
-    } else {
+        return ExitCode::SUCCESS;
+    }
+    #[cfg(feature = "cleanup")]
+    {
         // accept clients in second thread, so that this main thread can wait: TBD: the second
         // thread has ownership of the listener, and so is responsible for removing the socket and
         // lock files - but it won't be told about the exit.  How to get it to shutdown properly and
@@ -81,12 +92,19 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
         // Wait for any thread to report a problem, or exit due to the terminate option:
         multithread_exit_handler()
     }
+    #[cfg(not(feature = "cleanup"))]
+    {
+        accept();
+        ExitCode::SUCCESS
+    }
 }
 
 impl SharedOptions {
     fn new(matches: &Matches) -> &'static Self {
         let wo = Leaker.alloc(SharedOptions {
+            #[cfg(feature = "forking")]
             fork_sessions: matches.opt_present("c"),
+            #[cfg(feature = "terminator")]
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
             debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
@@ -97,6 +115,7 @@ impl SharedOptions {
             },
         });
 
+        #[cfg(all(feature = "forking", feature = "terminator"))]
         assert!(
             !(wo.terminate_after.is_some() && wo.fork_sessions),
             "-t and -c cannot be used together"
@@ -176,6 +195,7 @@ fn start_listening(matches: &Matches) -> SocketListener {
 
     // If we've been told to daemonize, do so to allow subsequent clients to start that were waiting
     // for this parent process to exit:
+    #[cfg(feature = "forking")]
     if matches.opt_present("z") {
         unsafe { daemonize() }.unwrap();
         rustix::process::setsid().unwrap();
@@ -193,6 +213,7 @@ fn get_options() -> Options {
         "file descriptor for waydapt to unlock when its socket is ready",
         "FILE-DESCRIPTOR",
     );
+    #[cfg(feature = "forking")]
     opts.optflag("c", "childprocs", "make client sessions child processes instead of threads");
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
     opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
@@ -213,35 +234,47 @@ fn get_options() -> Options {
         "a directory of protocol XML files (can appear multiple times)",
         "DIR",
     );
+    #[cfg(feature = "terminator")]
     opts.optopt(
         "t",
         "terminate",
+        #[cfg(not(feature = "forking"))]
+        "terminate after last client and no others for secs",
+        #[cfg(feature = "forking")]
         "terminate after last client and no others for secs (can't be used with -c)",
         "SECS",
     );
     opts.optflag("v", "version", "Show version info and exit");
+    #[cfg(feature = "forking")]
     opts.optflag("z", "daemonize", "daemonize waydapt when its socket is ready");
     opts
 }
 
+#[allow(clippy::needless_pass_by_value)]
+#[allow(unsafe_code)]
 fn accept_clients(
     listener: SocketListener, options: &'static SharedOptions,
     interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
 ) {
-    #![allow(unsafe_code)]
+    #[cfg(feature = "forking")]
     let fork_sessions = options.fork_sessions;
     for client_stream in listener.incoming() {
         let Ok(client_stream) = client_stream else {
             eprintln!("Client listener error: {client_stream:?}");
-            if !fork_sessions {
+            #[cfg(feature = "forking")]
+            if fork_sessions {
                 // we are in thread 2, so panicking here does no good.  Instead, tell the main
                 // thread to exit, and panic if that doesn't work:
-                multithread_exit(ExitCode::FAILURE);
+                panic!();
             }
+            #[cfg(feature = "cleanup")]
+            multithread_exit(ExitCode::FAILURE);
+            #[cfg(not(feature = "cleanup"))]
             panic!();
         };
         let session = move || client_session(options, interfaces, handlers, client_stream);
 
+        #[cfg(feature = "forking")]
         if fork_sessions {
             // we are in the main thread (because fork_sessions), so unwrap failing will terminate
             // the process:
