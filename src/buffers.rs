@@ -4,7 +4,9 @@ use crate::header::{get_msg_nwords, MessageHeader};
 use crate::streams::{recv_msg, send_msg, IOStream};
 use arrayvec::ArrayVec;
 use rustix::fd::BorrowedFd;
-use std::collections::{LinkedList, VecDeque};
+#[cfg(not(feature = "nolinkedlist"))]
+use std::collections::LinkedList;
+use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
 
@@ -107,8 +109,10 @@ const CHUNK_SIZE: usize = MAX_WORDS_OUT * 2;
 
 type Chunk = ArrayVec<u32, CHUNK_SIZE>;
 // Either of the following works:
+#[cfg(not(feature = "nolinkedlist"))]
 type Chunks = LinkedList<Chunk>;
-//type Chunks = VecDeque<Box<Chunk>>;
+#[cfg(feature = "nolinkedlist")]
+type Chunks = VecDeque<Box<Chunk>>;
 
 #[derive(Debug)]
 pub(crate) struct OutBuffer<'a> {

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use crate::multithread_exit::{multithread_exit, ExitCode};
+use crate::multithread_exit::multithread_exit;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::{panicking, sleep};
 use std::time::Duration;
