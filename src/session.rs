@@ -116,14 +116,22 @@ pub(crate) fn client_session(
     // own the streams because it also needs references to those streams from its buffers, and
     // owning something while also referencing it is not Rusty.
     let client_stream = client_stream;
-    // Consider a case where the wayland server's socket was deleted.  That should only prevent
-    // future clients from connecting, it should not cause existing clients to exit.  So unwrap
-    // instead of multithread_exit:
-    let server_stream = UnixStream::connect(server_socket_path).unwrap();
 
     // When would get_socket_peercred ever fail, given that we know the arg is correct?
     // Probably never.  Does it matter then how we handle it?:
     let ucred = get_socket_peercred(&client_stream).unwrap();
+    let pid = ucred.pid;
+
+    // Consider a case where the wayland server's socket was deleted.  That should only prevent
+    // future clients from connecting, it should not cause existing clients to exit.  So panic
+    // instead of multithread_exit:
+    let server_stream = UnixStream::connect(server_socket_path).unwrap_or_else(|e| {
+        panic!(
+            "Cannot connect {pid:?} to Wayland server through socket {:?}:\n{e:?}",
+            server_socket_path.as_path()
+        )
+    });
+
     let init_info = InitInfo { ucred, active_interfaces, options };
 
     // options.terminate can only be Some(duration) if options.fork_sessions is false, meaning we
@@ -139,9 +147,9 @@ pub(crate) fn client_session(
 
     if let Err(e) = crate::event_loop::event_loop(&mut session) {
         match e.kind() {
-            ErrorKind::ConnectionReset => eprintln!("Connection reset for {ucred:?}: {e:?}"),
-            ErrorKind::ConnectionAborted => eprintln!("Connection aborted for {ucred:?}: {e:?}"),
-            _ => eprintln!("Unexpected session error for {ucred:?}: {e:?}"),
+            ErrorKind::ConnectionReset => eprintln!("Connection reset for {pid:?}: {e:?}"),
+            ErrorKind::ConnectionAborted => eprintln!("Connection aborted for {pid:?}: {e:?}"),
+            _ => eprintln!("Unexpected session error for {pid:?}: {e:?}"),
         }
     }
 }

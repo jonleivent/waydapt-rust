@@ -47,6 +47,7 @@ version = "0.2.155"
 
 [profile.release]
 codegen-units = 1
+strip = true
 lto = "fat"
 
 [profile.small]

@@ -71,7 +71,6 @@ pub(crate) trait EventHandler {
 
     fn handle_error(&mut self, _fd_index: usize, flags: EventFlags) -> IoResult<()> {
         use std::io::{Error, ErrorKind};
-        // TBD - maybe improve error messages for some sets of flags, like HUP
         if flags == EventFlags::HUP {
             Err(Error::new(ErrorKind::ConnectionAborted, "normal HUP termination"))
         } else {
