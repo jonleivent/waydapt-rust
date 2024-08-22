@@ -1,4 +1,4 @@
-fn main() -> core::result::Result<(), Box<(dyn core::error::Error + 'static)>> {
+fn main() -> core::result::Result<(), Box<(dyn std::error::Error + 'static)>> {
     use vergen_gitcl::{BuildBuilder, CargoBuilder, Emitter, GitclBuilder, RustcBuilder};
 
     println!("cargo::rerun-if-changed=src");
