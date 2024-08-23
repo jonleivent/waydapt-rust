@@ -97,6 +97,12 @@ impl SessionInitInfo for InitInfo {
     fn get_debug_level(&self) -> u32 { self.options.debug_level }
 }
 
+const FAKE_UCRED: rustix::net::UCred = rustix::net::UCred {
+    pid: rustix::process::Pid::INIT,
+    uid: rustix::process::Uid::ROOT,
+    gid: rustix::process::Gid::ROOT,
+};
+
 // For errors that should kill off the process even if in multithreaded mode, call
 // multithread_exit if options.fork_sessions is false (which indicates multithreaded mode).
 // Otherwise panic or quivalent (unwrap).  Everything in here should just panic:
@@ -119,7 +125,7 @@ pub(crate) fn client_session(
 
     // When would get_socket_peercred ever fail, given that we know the arg is correct?
     // Probably never.  Does it matter then how we handle it?:
-    let ucred = get_socket_peercred(&client_stream).unwrap();
+    let ucred = get_socket_peercred(&client_stream).unwrap_or(FAKE_UCRED);
     let pid = ucred.pid;
 
     // Consider a case where the wayland server's socket was deleted.  That should only prevent
