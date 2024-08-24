@@ -11,10 +11,11 @@ use crate::multithread_exit::{multithread_exit, multithread_exit_handler};
 use crate::postparse::{active_interfaces, ActiveInterfaces};
 use crate::session::client_session;
 use getopts::{Matches, Options, ParsingStyle};
+use rustix::fs::{flock, FlockOperation};
 use std::collections::VecDeque;
 use std::env::Args;
 use std::os::unix::io::{FromRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 #[cfg(feature = "terminator")]
 use std::time::Duration;
@@ -62,6 +63,17 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     // do all protocol and globals parsing, and handler linkups:
     let (active_interfaces, session_handlers) =
         globals_and_handlers(&matches, all_args, init_handlers);
+
+    if matches.opt_present("w") {
+        let server_lock_pathbuf = crate::listener::get_server_socket_path().with_extension("lock");
+        let roptions = &options;
+        std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions));
+    }
+
+    if let Some(exit_lock_filename) = matches.opt_str("e") {
+        let roptions = &options;
+        std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions));
+    }
 
     // Start listening on the socket for our clients:
     let listener = start_listening(&matches);
@@ -221,8 +233,6 @@ fn globals_and_handlers(
 
 fn start_listening(matches: &Matches) -> SocketListener {
     #![allow(unsafe_code)]
-    use rustix::fs::{flock, FlockOperation};
-
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
     let listener = SocketListener::new(display_name);
 
@@ -269,6 +279,7 @@ fn get_options() -> Options {
     #[cfg(feature = "forking")]
     opts.optflag("c", "childprocs", "make client sessions child processes instead of threads");
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
+    opts.optopt("e", "exitlock", "file to monitor for exiting when unlocked", "FILE");
     opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
     opts.optopt(
         "g",
@@ -298,6 +309,7 @@ fn get_options() -> Options {
         "SECS",
     );
     opts.optflag("v", "version", "Show version info and exit");
+    opts.optflag("w", "watchserver", "Exit when server exits");
     #[cfg(feature = "forking")]
     opts.optflag("z", "daemonize", "daemonize waydapt when its socket is ready");
     opts
@@ -312,8 +324,8 @@ fn accept_clients(
     #[cfg(feature = "forking")]
     let fork_sessions = options.fork_sessions;
     for client_stream in listener.incoming() {
-        let Ok(client_stream) = client_stream else {
-            eprintln!("Client listener error: {client_stream:?}");
+        let client_stream = client_stream.unwrap_or_else(|e| {
+            eprintln!("Client listener error: {e:?}");
             #[cfg(feature = "forking")]
             if fork_sessions {
                 panic!();
@@ -322,7 +334,7 @@ fn accept_clients(
             multithread_exit(ExitCode::FAILURE);
             #[cfg(not(feature = "cleanup"))]
             panic!();
-        };
+        });
         let session = move || client_session(options, interfaces, handlers, client_stream);
 
         #[cfg(feature = "forking")]
@@ -336,4 +348,28 @@ fn accept_clients(
         // dropping the returned JoinHandle detaches the thread, which is what we want
         std::thread::spawn(session);
     }
+}
+
+#[allow(unused)]
+fn monitor_lock_file(path: impl AsRef<Path>, options: &'static SharedOptions) {
+    let pathname = path.as_ref().to_str().unwrap();
+    let lock_file = std::fs::File::open(&path).unwrap_or_else(|e| {
+        eprintln!("Cannot open {pathname} : {e:?}");
+        std::process::exit(1);
+    });
+    flock(&lock_file, FlockOperation::LockShared).unwrap_or_else(|e| {
+        eprintln!("Cannot flock {pathname} : {e:?}");
+        std::process::exit(1);
+    });
+    eprintln!("Exiting due to unlocked {pathname}");
+    #[cfg(feature = "forking")]
+    let fork_sessions = options.fork_sessions;
+    #[cfg(not(feature = "forking"))]
+    let fork_sessions = false;
+    #[cfg(feature = "cleanup")]
+    if !fork_sessions {
+        multithread_exit(ExitCode::SUCCESS);
+    }
+    #[cfg(not(feature = "cleanup"))]
+    std::process::exit(0);
 }
