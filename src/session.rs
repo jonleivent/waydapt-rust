@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use rustix::event::epoll::EventFlags;
+
 use crate::buffers::{InBuffer, OutBuffer};
 use crate::crate_traits::EventHandler;
 use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
@@ -36,7 +38,11 @@ impl<'a> Session<'a> {
 }
 
 impl<'a> EventHandler for Session<'a> {
-    fn fds_to_monitor(&self) -> impl Iterator<Item = BorrowedFd<'_>> { self.fds.into_iter() }
+    fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
+        self.fds
+            .into_iter()
+            .zip(std::iter::repeat(EventFlags::IN | EventFlags::OUT | EventFlags::ET))
+    }
 
     fn handle_input(&mut self, index: usize) -> IoResult<()> {
         // By trying receive repeatedly until there's nothing left, we can use edge triggered IN

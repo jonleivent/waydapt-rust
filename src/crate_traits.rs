@@ -63,7 +63,7 @@ pub(crate) trait Messenger {
 }
 
 pub(crate) trait EventHandler {
-    fn fds_to_monitor(&self) -> impl Iterator<Item = BorrowedFd<'_>>;
+    fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)>;
 
     fn handle_input(&mut self, fd_index: usize) -> IoResult<()>;
 

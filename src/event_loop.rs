@@ -7,21 +7,26 @@ use std::io::Result as IoResult;
 
 pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()> {
     let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
-    let fds = event_handler.fds_to_monitor();
     // If we edge-trigger output (and we have to), and we combine input and output events,
     // then we have to edge-trigger input.
-    let flags = EventFlags::IN | EventFlags::OUT | EventFlags::ET;
     let mut count = 0;
-    for fd in fds {
-        let data = EventData::new_u64(count as u64);
-        epoll::add(&epoll_fd, fd, data, flags)?;
-        count += 1;
+    {
+        let mut etinputs = Vec::new();
+        let fds_flags = event_handler.fds_to_monitor();
+        for (fd, flags) in fds_flags {
+            let data = EventData::new_u64(count as u64);
+            epoll::add(&epoll_fd, fd, data, flags)?;
+            if flags.contains(EventFlags::IN | EventFlags::ET) {
+                etinputs.push(count);
+            }
+            count += 1;
+        }
+        for i in etinputs {
+            // if input is edge-triggered, we may miss initial state, so try it here:
+            event_handler.handle_input(i)?;
+        }
     }
     debug_assert!(count > 0);
-    // Since everything is edge-triggered, we may miss initial input state, so try it here:
-    for i in 0..count {
-        event_handler.handle_input(i)?;
-    }
     #[allow(clippy::cast_possible_truncation)]
     let mut events = EventVec::with_capacity(count); // would longer help?
     loop {
