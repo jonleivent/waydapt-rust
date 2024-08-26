@@ -1,36 +1,47 @@
 use crate::addons::IHMap;
 use crate::basics::Leaker;
-use crate::crate_traits::Alloc;
+use crate::crate_traits::{Alloc, EventHandler};
 use crate::for_handlers::SessionInitHandler;
 #[cfg(feature = "forking")]
 use crate::forking::{daemonize, double_fork, ForkResult};
 use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
-#[cfg(feature = "cleanup")]
-use crate::multithread_exit::{multithread_exit, multithread_exit_handler};
 use crate::postparse::{active_interfaces, ActiveInterfaces};
 use crate::session::client_session;
 use getopts::{Matches, Options, ParsingStyle};
+use nix::sys::pthread;
+use nix::sys::signal;
+use nix::sys::signalfd::{SfdFlags, SignalFd};
+use rustix::event::epoll::EventFlags;
 use rustix::fs::{flock, FlockOperation};
+use signal::{SigSet, Signal};
 use std::collections::VecDeque;
 use std::env::Args;
+use std::io::{Error, ErrorKind, Result as IoResult};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-#[cfg(feature = "terminator")]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
     #[cfg(feature = "forking")]
     pub(crate) fork_sessions: bool,
-    #[cfg(feature = "terminator")]
     pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
+    #[cfg(feature = "forking")]
+    pub(crate) setsid: bool,
 }
 
-pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
+static MAIN_ID: OnceLock<(/*pid*/ u32, pthread::Pthread)> = OnceLock::new();
+
+pub(crate) fn startup(init_handlers: &IHMap) {
+    static W_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
+    static E_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
+
     let all_args = &mut std::env::args();
     let program = all_args.next().unwrap();
     let our_args = all_args.take_while(|a| a != "--");
@@ -38,9 +49,9 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     let matches = opts.parse(our_args).unwrap();
 
     if matches.opt_present("h") {
-        let brief = format!("Usage: {program} [options] -- ...dlls-and-their-options...");
+        let brief = format!("Usage: {program} [options] -- ...addons-and-their-options...");
         eprint!("{}", opts.usage(&brief));
-        return ExitCode::SUCCESS;
+        return;
     }
 
     if matches.opt_present("l") {
@@ -53,8 +64,7 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
 
     if matches.opt_present("v") {
         print_version_info();
-
-        return ExitCode::SUCCESS;
+        return;
     }
 
     // gather options that can be used elsewhere:
@@ -64,46 +74,63 @@ pub(crate) fn startup(init_handlers: &IHMap) -> ExitCode {
     let (active_interfaces, session_handlers) =
         globals_and_handlers(&matches, all_args, init_handlers);
 
-    if matches.opt_present("w") {
-        let server_lock_pathbuf = crate::listener::get_server_socket_path().with_extension("lock");
-        let roptions = &options;
-        std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions));
+    let client_stream = {
+        // Start listening on the socket for our clients:
+        let listener = start_listening(&matches);
+
+        // start_listening might daemonize, so don't set MAIN_ID until afterwards, but before we spawn
+        // any threads:
+        MAIN_ID.set((std::process::id(), pthread::pthread_self())).unwrap();
+
+        let mut socket_event_handler =
+            SocketEventHandler::new(listener, options, active_interfaces, session_handlers);
+
+        // Creating the SocketEventHandler establishes the signal mask and signalfd, allowing
+        // termination signals from the following threads to be processed correctly:
+
+        if matches.opt_present("w") {
+            let server_lock_pathbuf =
+                crate::listener::get_server_socket_path().with_extension("lock");
+            let roptions = &options;
+            std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions, &W_THREAD));
+        }
+
+        if let Some(exit_lock_filename) = matches.opt_str("e") {
+            let roptions = &options;
+            std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions, &E_THREAD));
+        }
+
+        match crate::event_loop::event_loop(&mut socket_event_handler) {
+            Ok(client_stream) => client_stream,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {
+                if let Some(e) = e.into_inner() {
+                    eprintln!("Interrupted with {e:?}");
+                } else {
+                    eprintln!("Interrupted");
+                }
+                return;
+            }
+            e => panic!("{e:?}"),
+        }
+        // the above event loop only returns when we're in a forked child, and that causes this
+        // scope to end and the SocketEventHandler to get dropped, which closes its associated fds
+    };
+
+    // In the forked child.  We have already removed most of what it doesn't need, except for the
+    // two monitor_lock_file threads - which we will now (try to) kill off:
+
+    // A race is remotely possible in each of these 2 cases between this thread and the target
+    // thread setting the OnceLock.  But, not killing the threads only results in a waste of
+    // resources in the forked clients in which they appear.  The monitor_lock_file is a no-op
+    // (other than the resource waste) in processes other than the initial one.
+    if let Some(e_thread) = E_THREAD.get() {
+        let _ = pthread::pthread_kill(*e_thread, Signal::SIGUSR1);
+    }
+    if let Some(w_thread) = W_THREAD.get() {
+        let _ = pthread::pthread_kill(*w_thread, Signal::SIGUSR1);
     }
 
-    if let Some(exit_lock_filename) = matches.opt_str("e") {
-        let roptions = &options;
-        std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions));
-    }
-
-    // Start listening on the socket for our clients:
-    let listener = start_listening(&matches);
-
-    // How we accept new clients will be similar whether we fork sessions or not:
-    let accept = || accept_clients(listener, options, active_interfaces, session_handlers);
-
-    // If we're going to fork client sessions, then we don't need any special multi-threaded
-    // exit magic (to enable other threads to end the process in an orderly fashion, with
-    // destructors).  Otherwise, we do:
-    #[cfg(feature = "forking")]
-    if options.fork_sessions {
-        accept(); // accept_clients in this thread
-        return ExitCode::SUCCESS;
-    }
-    #[cfg(feature = "cleanup")]
-    {
-        // accept clients in second thread, so that this main thread can wait: TBD: the second
-        // thread has ownership of the listener, and so is responsible for removing the socket and
-        // lock files - but it won't be told about the exit.  How to get it to shutdown properly and
-        // do the listener drop?
-        std::thread::spawn(accept);
-        // Wait for any thread to report a problem, or exit due to the terminate option:
-        multithread_exit_handler()
-    }
-    #[cfg(not(feature = "cleanup"))]
-    {
-        accept();
-        ExitCode::SUCCESS
-    }
+    client_session(options, active_interfaces, session_handlers, client_stream);
 }
 
 fn print_version_info() {
@@ -169,9 +196,10 @@ impl SharedOptions {
         let wo = Leaker.alloc(SharedOptions {
             #[cfg(feature = "forking")]
             fork_sessions: matches.opt_present("c"),
-            #[cfg(feature = "terminator")]
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
+            #[cfg(feature = "forking")]
+            setsid: matches.opt_present("s"),
             debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
                 Ok("1") => 1,
                 Ok("client") => 2,
@@ -180,11 +208,15 @@ impl SharedOptions {
             },
         });
 
-        #[cfg(all(feature = "forking", feature = "terminator"))]
+        #[cfg(feature = "forking")]
         assert!(
             !(wo.terminate_after.is_some() && wo.fork_sessions),
             "-t and -c cannot be used together"
         );
+        #[cfg(feature = "forking")]
+        if wo.setsid {
+            assert!(wo.fork_sessions, "-s requres -c");
+        }
         wo
     }
 }
@@ -298,7 +330,7 @@ fn get_options() -> Options {
         "a directory of protocol XML files (can appear multiple times)",
         "DIR",
     );
-    #[cfg(feature = "terminator")]
+    opts.optflag("s", "setsid", "with -c, call setsid in each child process");
     opts.optopt(
         "t",
         "terminate",
@@ -315,61 +347,140 @@ fn get_options() -> Options {
     opts
 }
 
-#[allow(clippy::needless_pass_by_value)]
-#[allow(unsafe_code)]
-fn accept_clients(
-    listener: SocketListener, options: &'static SharedOptions,
-    interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
-) {
-    #[cfg(feature = "forking")]
-    let fork_sessions = options.fork_sessions;
-    for client_stream in listener.incoming() {
-        let client_stream = client_stream.unwrap_or_else(|e| {
-            eprintln!("Client listener error: {e:?}");
-            #[cfg(feature = "forking")]
-            if fork_sessions {
-                panic!();
-            }
-            #[cfg(feature = "cleanup")]
-            multithread_exit(ExitCode::FAILURE);
-            #[cfg(not(feature = "cleanup"))]
-            panic!();
-        });
-        let session = move || client_session(options, interfaces, handlers, client_stream);
-
-        #[cfg(feature = "forking")]
-        if fork_sessions {
-            // we are in the main thread (because fork_sessions), so unwrap failing will terminate
-            // the process:
-            let ForkResult::Child = unsafe { double_fork() }.unwrap() else { continue };
-            listener.drop_without_removes();
-            return session();
-        }
-        // dropping the returned JoinHandle detaches the thread, which is what we want
-        std::thread::spawn(session);
-    }
+struct SocketEventHandler {
+    listener: SocketListener,
+    signalfd: SignalFd,
+    options: &'static SharedOptions,
+    interfaces: &'static ActiveInterfaces,
+    handlers: &'static VecDeque<SessionInitHandler>,
 }
 
 #[allow(unused)]
-fn monitor_lock_file(path: impl AsRef<Path>, options: &'static SharedOptions) {
+impl SocketEventHandler {
+    fn new(
+        listener: SocketListener, options: &'static SharedOptions,
+        interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
+    ) -> Self {
+        let mut mask = SigSet::empty();
+        mask.add(signal::SIGTERM);
+        mask.add(signal::SIGHUP);
+        mask.add(signal::SIGINT);
+        mask.add(signal::SIGUSR1); // for self termination from sessions or monitor threads
+        mask.thread_block().unwrap();
+        let signalfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK).unwrap();
+
+        SocketEventHandler { listener, signalfd, options, interfaces, handlers }
+    }
+
+    fn get_session(&self, client_stream: UnixStream) -> impl FnOnce() + Send + 'static {
+        let options = self.options;
+        let interfaces = self.interfaces;
+        let handlers = self.handlers;
+        move || client_session(options, interfaces, handlers, client_stream)
+    }
+
+    fn handle_signal_input(&mut self) -> IoResult<Option<UnixStream>> {
+        // obviously, this never returns a UnixStream
+        let sig = match self.signalfd.read_signal() {
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e.into()),
+            Ok(Some(sig)) => sig,
+        };
+        #[allow(clippy::cast_possible_wrap)]
+        let signal = Signal::try_from(sig.ssi_signo as i32).unwrap();
+        let err = Error::new(ErrorKind::Interrupted, signal.as_ref());
+        Err(err)
+    }
+
+    fn in_child_after_fork(&mut self) {
+        self.listener.prevent_removes_on_drop();
+        SigSet::all().thread_unblock().unwrap();
+    }
+
+    fn handle_listener_input(&mut self) -> IoResult<Option<UnixStream>> {
+        match self.listener.accept() {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+            Ok((client_stream, _)) => {
+                #[cfg(feature = "forking")]
+                if self.options.fork_sessions {
+                    #[allow(unsafe_code)]
+                    if let ForkResult::Child = unsafe { double_fork() }.unwrap() {
+                        self.in_child_after_fork();
+                        if self.options.setsid {
+                            rustix::process::setsid();
+                        }
+                        return Ok(Some(client_stream));
+                    }
+                    return Ok(None);
+                }
+                let session = self.get_session(client_stream);
+                // dropping the returned JoinHandle detaches the thread, which is what we want
+                std::thread::spawn(session);
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl EventHandler for SocketEventHandler {
+    type InputResult = UnixStream;
+
+    fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
+        let flags = EventFlags::IN; // level triggered
+        [(self.listener.as_fd(), flags), (self.signalfd.as_fd(), flags)].into_iter()
+    }
+
+    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<UnixStream>> {
+        match fd_index {
+            0 => self.handle_listener_input(),
+            1 => self.handle_signal_input(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn handle_output(&mut self, _fd_index: usize) -> IoResult<()> {
+        unreachable!("We didn't ask for no output!")
+    }
+}
+
+pub(crate) fn terminate_main_thread() {
+    // The signalfd is only in the initial process.  Forked children must exit instead:
+    let (main_pid, main_thread) = MAIN_ID.get().unwrap();
+    if std::process::id() != *main_pid {
+        std::process::exit(-1);
+    }
+    assert!(
+        *main_thread != pthread::pthread_self(),
+        "terminate_main_thread called from main thread of initial process"
+    );
+
+    pthread::pthread_kill(*main_thread, Signal::SIGUSR1).unwrap();
+}
+
+#[allow(unused)]
+fn monitor_lock_file(
+    path: impl AsRef<Path>, options: &'static SharedOptions, thread: &OnceLock<pthread::Pthread>,
+) {
+    thread.set(pthread::pthread_self()).unwrap();
     let pathname = path.as_ref().to_str().unwrap();
     let lock_file = std::fs::File::open(&path).unwrap_or_else(|e| {
         eprintln!("Cannot open {pathname} : {e:?}");
         std::process::exit(1);
     });
+
     flock(&lock_file, FlockOperation::LockShared).unwrap_or_else(|e| {
+        if e == rustix::io::Errno::INTR {
+            // this happens in forked child sessions, where we don't want to monitor lock files
+            return;
+        }
         eprintln!("Cannot flock {pathname} : {e:?}");
         std::process::exit(1);
     });
-    eprintln!("Exiting due to unlocked {pathname}");
-    #[cfg(feature = "forking")]
-    let fork_sessions = options.fork_sessions;
-    #[cfg(not(feature = "forking"))]
-    let fork_sessions = false;
-    #[cfg(feature = "cleanup")]
-    if !fork_sessions {
-        multithread_exit(ExitCode::SUCCESS);
+    let (main_pid, _) = MAIN_ID.get().unwrap();
+    if std::process::id() != *main_pid {
+        return;
     }
-    #[cfg(not(feature = "cleanup"))]
-    std::process::exit(0);
+    eprintln!("Exiting due to unlocked {pathname}");
+    terminate_main_thread();
 }

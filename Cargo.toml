@@ -5,9 +5,8 @@ edition = "2021"
 build = "build.rs"
 
 [features]
-forking = ["dep:libc", "dep:nix"]
-terminator = []
-cleanup = []
+default = [ "forking" ]
+forking = ["dep:libc"]
 nolinkedlist = []
 
 
@@ -35,9 +34,8 @@ features = [
 ]
 
 [dependencies.nix]
-optional = true
 version = "0.29.0"
-features = [ "process" ]
+features = [ "process", "pthread", "signal" ]
 
 [dependencies.libc]
 optional = true

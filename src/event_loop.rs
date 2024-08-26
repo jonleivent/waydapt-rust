@@ -5,10 +5,8 @@ use epoll::{CreateFlags, Event, EventData, EventFlags, EventVec};
 use rustix::event::epoll;
 use std::io::Result as IoResult;
 
-pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()> {
+pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::InputResult> {
     let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
-    // If we edge-trigger output (and we have to), and we combine input and output events,
-    // then we have to edge-trigger input.
     let mut count = 0;
     {
         let mut etinputs = Vec::new();
@@ -27,7 +25,6 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()>
         }
     }
     debug_assert!(count > 0);
-    #[allow(clippy::cast_possible_truncation)]
     let mut events = EventVec::with_capacity(count); // would longer help?
     loop {
         epoll::wait(&epoll_fd, &mut events, -1)?;
@@ -42,7 +39,9 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<()>
                 event_handler.handle_output(i)?;
             }
             if flags.contains(EventFlags::IN) {
-                event_handler.handle_input(i)?;
+                if let Some(r) = event_handler.handle_input(i)? {
+                    return Ok(r);
+                }
             }
             let error_flags = flags.difference(EventFlags::IN | EventFlags::OUT);
             if !error_flags.is_empty() {

@@ -38,13 +38,15 @@ impl<'a> Session<'a> {
 }
 
 impl<'a> EventHandler for Session<'a> {
+    type InputResult = ();
+
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         self.fds
             .into_iter()
             .zip(std::iter::repeat(EventFlags::IN | EventFlags::OUT | EventFlags::ET))
     }
 
-    fn handle_input(&mut self, index: usize) -> IoResult<()> {
+    fn handle_input(&mut self, index: usize) -> IoResult<Option<()>> {
         // By trying receive repeatedly until there's nothing left, we can use edge triggered IN
         // events, which may give higher performance:
         // https://thelinuxcode.com/epoll-7-c-function/
@@ -71,7 +73,7 @@ impl<'a> EventHandler for Session<'a> {
             // flush any part might starve the receiver.
             outbuf.flush(true)?;
         }
-        Ok(())
+        Ok(None)
     }
 
     fn handle_output(&mut self, index: usize) -> IoResult<()> {
@@ -116,7 +118,6 @@ pub(crate) fn client_session(
     options: &'static crate::setup::SharedOptions, active_interfaces: &'static ActiveInterfaces,
     session_handlers: &VecDeque<SessionInitHandler>, client_stream: UnixStream,
 ) {
-    #[cfg(feature = "terminator")]
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
     use std::io::ErrorKind;
@@ -149,7 +150,6 @@ pub(crate) fn client_session(
     // options.terminate can only be Some(duration) if options.fork_sessions is false, meaning we
     // are in multi-threaded mode - use it to conditionally set up a SessionTerminator that will
     // terminate the waydapt process after the last session ends plus the duration:
-    #[cfg(feature = "terminator")]
     #[forbid(let_underscore_drop)]
     let _st = options.terminate_after.map(SessionTerminator::new);
 

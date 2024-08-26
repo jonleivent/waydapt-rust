@@ -1,9 +1,7 @@
 #![forbid(unsafe_code)]
 
-use crate::multithread_exit::multithread_exit;
-use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread::{panicking, sleep};
+use std::thread::sleep;
 use std::time::Duration;
 
 // When a client session ends, and we are running in multi-threaded mode (sessions are threads,
@@ -47,8 +45,8 @@ impl Drop for SessionTerminator {
             sleep(self.timeout);
             if saved_client_session_total == CLIENT_SESSION_TOTAL.load(Ordering::Relaxed) {
                 // No new sessions since we decided above we were last, so exit.
-                let exit_code = if panicking() { ExitCode::FAILURE } else { ExitCode::SUCCESS };
-                multithread_exit(exit_code);
+                eprintln!("Exiting due to no new clients since -t {} secs", self.timeout.as_secs());
+                crate::setup::terminate_main_thread();
             }
         }
     }

@@ -56,11 +56,12 @@ impl SocketListener {
             remove_file(&socket_path).unwrap();
         }
         let unix_listener = UnixListener::bind(&socket_path).unwrap();
+        unix_listener.set_nonblocking(true).unwrap();
         Self { socket_path, unix_listener, lock_path, lock_file, do_removes: true }
     }
 
     #[allow(unused)]
-    pub(crate) fn drop_without_removes(mut self) { self.do_removes = false; }
+    pub(crate) fn prevent_removes_on_drop(&mut self) { self.do_removes = false; }
 }
 
 impl Deref for SocketListener {

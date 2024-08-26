@@ -4,8 +4,8 @@ use nix::sys::wait::{waitpid, WaitPidFlag};
 use nix::unistd::fork;
 pub(crate) use nix::unistd::ForkResult;
 
-// Use libc::_exit instead of std::process::exit so that no destructors run, even when called from
-// the main thread.
+// Use libc::_exit instead of std::process::exit so that no atexit handlers or signal handlers are
+// called, and no buffers are flushed - in other words, don't interfere with the other forks.
 
 pub(crate) unsafe fn double_fork() -> nix::Result<ForkResult> {
     match unsafe { fork() } {
