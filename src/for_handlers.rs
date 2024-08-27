@@ -15,15 +15,14 @@ pub trait MessageInfo<'a> {
     fn get_size(&self) -> usize;
 }
 
+pub type RInterface = &'static Interface<'static>;
+
 pub trait SessionInitInfo {
     fn ucred(&self) -> rustix::net::UCred;
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces;
-    // TBD: get method for active interfaces, etc.
     fn get_display(&self) -> RInterface; // wl_display
     fn get_debug_level(&self) -> u32;
 }
-
-pub type RInterface = &'static Interface<'static>;
 
 pub trait SessionInfo: SessionInitInfo {
     fn try_lookup(&self, id: u32) -> Option<RInterface>;
@@ -38,23 +37,9 @@ pub enum MessageHandlerResult {
     Drop,
 }
 
-// TBD: these fn types could be made more general.  They need to be Sendable.  thread::spawn uses:
-// pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-// where
-//    F: FnOnce() -> T + Send + 'static,
-//    T: Send + 'static,
-// We need something like this but with Fn instead of FnOnce.  Probably &dyn as well.
-
 pub type MessageHandler = fn(&mut dyn MessageInfo, &mut dyn SessionInfo) -> MessageHandlerResult;
 
 pub type SessionInitHandler = fn(&dyn SessionInitInfo);
-
-// TBD: a more general callable type is Box<dyn FnMut(...) + Clone> that we clone into each session
-// as needed.  But why does it need state?  The MessageHandlers can't have state.  If we want each
-// addon to have per-session state, they need to use thread_local somehow to set that up.
-
-// It would make sense if SessionInitHandler was FnOnce + Clone, and if MessageHandler was FnMut +
-// Clone if we somehow arrange for each session to have its own copy.
 
 #[derive(Debug)]
 pub enum AddHandlerError {

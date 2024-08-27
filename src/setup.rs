@@ -355,7 +355,6 @@ struct SocketEventHandler {
     handlers: &'static VecDeque<SessionInitHandler>,
 }
 
-#[allow(unused)]
 impl SocketEventHandler {
     fn new(
         listener: SocketListener, options: &'static SharedOptions,
@@ -365,7 +364,7 @@ impl SocketEventHandler {
         mask.add(signal::SIGTERM);
         mask.add(signal::SIGHUP);
         mask.add(signal::SIGINT);
-        mask.add(signal::SIGUSR1); // for self termination from sessions or monitor threads
+        mask.add(signal::SIGUSR1); // for terminate_main_thread
         mask.thread_block().unwrap();
         let signalfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK).unwrap();
 
@@ -381,19 +380,22 @@ impl SocketEventHandler {
 
     fn handle_signal_input(&mut self) -> IoResult<Option<UnixStream>> {
         // obviously, this never returns a UnixStream
+        #[allow(clippy::cast_possible_wrap)]
         let sig = match self.signalfd.read_signal() {
             Ok(None) => return Ok(None),
             Err(e) => return Err(e.into()),
-            Ok(Some(sig)) => sig,
+            Ok(Some(ref sig)) => sig.ssi_signo as i32,
         };
-        #[allow(clippy::cast_possible_wrap)]
-        let signal = Signal::try_from(sig.ssi_signo as i32).unwrap();
+        let signal = Signal::try_from(sig).unwrap();
         let err = Error::new(ErrorKind::Interrupted, signal.as_ref());
         Err(err)
     }
 
     fn in_child_after_fork(&mut self) {
         self.listener.prevent_removes_on_drop();
+        if self.options.setsid {
+            let _ = rustix::process::setsid();
+        }
         SigSet::all().thread_unblock().unwrap();
     }
 
@@ -406,15 +408,11 @@ impl SocketEventHandler {
                     #[allow(unsafe_code)]
                     if let ForkResult::Child = unsafe { double_fork() }.unwrap() {
                         self.in_child_after_fork();
-                        if self.options.setsid {
-                            rustix::process::setsid();
-                        }
                         return Ok(Some(client_stream));
                     }
                     return Ok(None);
                 }
                 let session = self.get_session(client_stream);
-                // dropping the returned JoinHandle detaches the thread, which is what we want
                 std::thread::spawn(session);
                 Ok(None)
             }
