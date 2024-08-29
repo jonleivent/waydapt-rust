@@ -557,7 +557,6 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "getopts",
- "libc",
  "nix",
  "quick-xml",
  "rustix",

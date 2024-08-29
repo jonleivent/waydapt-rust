@@ -2,7 +2,6 @@ use crate::addons::IHMap;
 use crate::basics::Leaker;
 use crate::crate_traits::{Alloc, EventHandler};
 use crate::for_handlers::SessionInitHandler;
-use crate::forking::{daemonize, double_fork, ForkResult};
 use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
 use crate::postparse::{active_interfaces, ActiveInterfaces};
@@ -17,25 +16,21 @@ use signal::{SigSet, Signal};
 use std::collections::VecDeque;
 use std::env::Args;
 use std::io::{Error, ErrorKind, Result as IoResult};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, RawFd};
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
-    pub(crate) fork_sessions: bool,
     pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
 }
 
-static MAIN_ID: OnceLock<(/*pid*/ u32, pthread::Pthread)> = OnceLock::new();
-static RAW_WFD: AtomicI32 = AtomicI32::new(-1);
-static RAW_EFD: AtomicI32 = AtomicI32::new(-1);
+static MAIN_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
 
 pub(crate) fn startup(init_handlers: &IHMap) {
     let all_args = &mut std::env::args();
@@ -70,59 +65,39 @@ pub(crate) fn startup(init_handlers: &IHMap) {
     let (active_interfaces, session_handlers) =
         globals_and_handlers(&matches, all_args, init_handlers);
 
-    let client_stream = {
-        // Start listening on the socket for our clients:
-        let listener = start_listening(&matches);
+    // Start listening on the socket for our clients:
+    let listener = start_listening(&matches);
 
-        // start_listening might daemonize, so don't set MAIN_ID until afterwards, but before we spawn
-        // any threads:
-        MAIN_ID.set((std::process::id(), pthread::pthread_self())).unwrap();
+    MAIN_THREAD.set(pthread::pthread_self()).unwrap();
 
-        let mut socket_event_handler =
-            SocketEventHandler::new(listener, options, active_interfaces, session_handlers);
+    let mut socket_event_handler =
+        SocketEventHandler::new(listener, options, active_interfaces, session_handlers);
 
-        // Creating the SocketEventHandler establishes the signal mask and signalfd, allowing
-        // termination signals from the following threads to be processed correctly:
+    // Creating the SocketEventHandler establishes the signal mask and signalfd, allowing
+    // termination signals from the following threads to be processed correctly:
 
-        if matches.opt_present("w") {
-            let server_lock_pathbuf =
-                crate::listener::get_server_socket_path().with_extension("lock");
-            let roptions = &options;
-            std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions, &RAW_WFD));
-        }
-
-        if let Some(exit_lock_filename) = matches.opt_str("e") {
-            let roptions = &options;
-            std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions, &RAW_EFD));
-        }
-
-        match crate::event_loop::event_loop(&mut socket_event_handler) {
-            Ok(client_stream) => client_stream,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {
-                if let Some(e) = e.into_inner() {
-                    eprintln!("Interrupted with {e:?}");
-                } else {
-                    eprintln!("Interrupted");
-                }
-                return;
-            }
-            e => panic!("{e:?}"),
-        }
-        // the above event loop only returns when we're in a forked child, and that causes this
-        // scope to end and the SocketEventHandler to get dropped, which closes its associated fds
-    };
-
-    // In the forked child.  We have already removed most unneeded resources (fds, threads). The
-    // ones that may be left over are the ones for the monitor_lock_file threads (which the forked
-    // child does not inherit), which we can close now (albeit unsafely):
-    close_raw_fd_after_fork(&RAW_WFD);
-    close_raw_fd_after_fork(&RAW_EFD);
-
-    if matches.opt_present("s") {
-        let _ = rustix::process::setsid();
+    if matches.opt_present("w") {
+        let server_lock_pathbuf = crate::listener::get_server_socket_path().with_extension("lock");
+        let roptions = &options;
+        std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions));
     }
 
-    client_session(options, active_interfaces, session_handlers, client_stream);
+    if let Some(exit_lock_filename) = matches.opt_str("e") {
+        let roptions = &options;
+        std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions));
+    }
+
+    match crate::event_loop::event_loop(&mut socket_event_handler) {
+        Ok(()) => eprintln!("Normal termination"),
+        Err(e) if e.kind() == ErrorKind::Interrupted => {
+            if let Some(e) = e.into_inner() {
+                eprintln!("Interrupted with {e}");
+            } else {
+                eprintln!("Interrupted");
+            }
+        }
+        Err(e) => panic!("{e}"),
+    }
 }
 
 fn print_version_info() {
@@ -186,7 +161,6 @@ fn print_version_info() {
 impl SharedOptions {
     fn new(matches: &Matches) -> &'static Self {
         let wo = Leaker.alloc(SharedOptions {
-            fork_sessions: matches.opt_present("c"),
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
             debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
@@ -197,10 +171,6 @@ impl SharedOptions {
             },
         });
 
-        assert!(
-            !(wo.terminate_after.is_some() && wo.fork_sessions),
-            "-t and -c cannot be used together"
-        );
         wo
     }
 }
@@ -252,14 +222,6 @@ fn start_listening(matches: &Matches) -> SocketListener {
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
     let listener = SocketListener::new(display_name);
 
-    // Now that the socket is ready, we can use either or both of two ways to notify/allow clients
-    // to request sessions: unlock the anti-lock fd and daemonizing this process.  Daemonizing is
-    // the easiest, but it requires that the startup scripts be set up with clients run right after
-    // the waydapt in the same script.  The anti-lock fd can be used to coordinate startup in more
-    // complex environments, such as when the waydapt starts in its own sandbox (where daemonizing
-    // won't help vs. processes outside, unless the sandbox wrapper itself is smart enough to
-    // daemonize when its child does).
-
     // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
     if let Some(anti_lock_fd) = matches.opt_str("a") {
         let raw = anti_lock_fd.parse().expect("-a fd : must be an int");
@@ -269,13 +231,6 @@ fn start_listening(matches: &Matches) -> SocketListener {
         };
         flock(owned, FlockOperation::Unlock).unwrap();
     };
-
-    // If we've been told to daemonize, do so to allow subsequent clients to start that were waiting
-    // for this parent process to exit:
-    if matches.opt_present("z") {
-        unsafe { daemonize() }.unwrap();
-        let _ = rustix::process::setsid();
-    }
 
     listener
 }
@@ -289,7 +244,6 @@ fn get_options() -> Options {
         "file descriptor for waydapt to unlock when its socket is ready",
         "FILE-DESCRIPTOR",
     );
-    opts.optflag("c", "childprocs", "make client sessions child processes instead of threads");
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
     opts.optopt("e", "exitlock", "file to monitor for exiting when unlocked", "FILE");
     opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
@@ -310,16 +264,9 @@ fn get_options() -> Options {
         "a directory of protocol XML files (can appear multiple times)",
         "DIR",
     );
-    opts.optflag("s", "setsid", "with -c, call setsid in each child process");
-    opts.optopt(
-        "t",
-        "terminate",
-        "terminate after last client and no others for secs (can't be used with -c)",
-        "SECS",
-    );
+    opts.optopt("t", "terminate", "terminate after last client and no others for secs", "SECS");
     opts.optflag("v", "version", "Show version info and exit");
     opts.optflag("w", "watchserver", "Exit when server exits");
-    opts.optflag("z", "daemonize", "daemonize waydapt when its socket is ready");
     opts
 }
 
@@ -347,61 +294,46 @@ impl SocketEventHandler {
         SocketEventHandler { listener, signalfd, options, interfaces, handlers }
     }
 
-    fn get_session(&self, client_stream: UnixStream) -> impl FnOnce() + Send + 'static {
+    fn spawn_session(&self, client_stream: UnixStream) {
         let options = self.options;
         let interfaces = self.interfaces;
         let handlers = self.handlers;
-        move || client_session(options, interfaces, handlers, client_stream)
+        let session = move || client_session(options, interfaces, handlers, client_stream);
+        std::thread::spawn(session);
     }
 
-    fn handle_signal_input(&mut self) -> IoResult<Option<UnixStream>> {
-        // obviously, this never returns a UnixStream
+    fn handle_signal_input(&mut self) -> IoResult<Option<()>> {
         #[allow(clippy::cast_possible_wrap)]
         let sig = match self.signalfd.read_signal() {
+            Ok(Some(ref sig)) => sig.ssi_signo as i32,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e.into()),
-            Ok(Some(ref sig)) => sig.ssi_signo as i32,
         };
         let signal = Signal::try_from(sig).unwrap();
         let err = Error::new(ErrorKind::Interrupted, signal.as_ref());
         Err(err)
     }
 
-    fn in_child_after_fork(&mut self) {
-        self.listener.prevent_removes_on_drop();
-        SigSet::all().thread_unblock().unwrap();
-    }
-
-    fn handle_listener_input(&mut self) -> IoResult<Option<UnixStream>> {
-        match self.listener.accept() {
-            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
-            Ok((client_stream, _)) => {
-                if self.options.fork_sessions {
-                    #[allow(unsafe_code)]
-                    if let ForkResult::Child = unsafe { double_fork() }.unwrap() {
-                        self.in_child_after_fork();
-                        return Ok(Some(client_stream));
-                    }
-                    return Ok(None);
-                }
-                let session = self.get_session(client_stream);
-                std::thread::spawn(session);
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        }
+    fn handle_listener_input(&mut self) -> IoResult<Option<()>> {
+        let client_stream = match self.listener.accept() {
+            Ok((client_stream, _)) => client_stream,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        self.spawn_session(client_stream);
+        Ok(None)
     }
 }
 
 impl EventHandler for SocketEventHandler {
-    type InputResult = UnixStream;
+    type InputResult = ();
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         let flags = EventFlags::IN; // level triggered
         [(self.listener.as_fd(), flags), (self.signalfd.as_fd(), flags)].into_iter()
     }
 
-    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<UnixStream>> {
+    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<()>> {
         match fd_index {
             0 => self.handle_listener_input(),
             1 => self.handle_signal_input(),
@@ -415,11 +347,7 @@ impl EventHandler for SocketEventHandler {
 }
 
 pub(crate) fn terminate_main_thread() {
-    // The signalfd is only in the initial process.  Forked children must exit instead:
-    let (main_pid, main_thread) = MAIN_ID.get().unwrap();
-    if std::process::id() != *main_pid {
-        std::process::exit(-1);
-    }
+    let main_thread = MAIN_THREAD.get().unwrap();
     assert!(
         *main_thread != pthread::pthread_self(),
         "terminate_main_thread called from main thread of initial process"
@@ -429,13 +357,12 @@ pub(crate) fn terminate_main_thread() {
 }
 
 #[allow(unused)]
-fn monitor_lock_file(path: impl AsRef<Path>, options: &'static SharedOptions, arfd: &AtomicI32) {
+fn monitor_lock_file(path: impl AsRef<Path>, options: &'static SharedOptions) {
     let pathname = path.as_ref().to_str().unwrap();
     let lock_file = std::fs::File::open(&path).unwrap_or_else(|e| {
         eprintln!("Cannot open {pathname} : {e:?}");
         std::process::exit(1);
     });
-    arfd.store(lock_file.as_raw_fd(), Ordering::Relaxed);
     flock(&lock_file, FlockOperation::LockShared).unwrap_or_else(|e| {
         if e == rustix::io::Errno::INTR {
             return;
@@ -443,20 +370,8 @@ fn monitor_lock_file(path: impl AsRef<Path>, options: &'static SharedOptions, ar
         eprintln!("Cannot flock {pathname} : {e:?}");
         std::process::exit(1);
     });
-    let (main_pid, _) = MAIN_ID.get().unwrap();
-    if std::process::id() != *main_pid {
-        return;
-    }
     eprintln!("Exiting due to unlocked {pathname}");
     terminate_main_thread();
-}
-
-fn close_raw_fd_after_fork(arfd: &AtomicI32) {
-    #![allow(unsafe_code)]
-    let raw = arfd.load(Ordering::Relaxed);
-    if raw >= 0 {
-        let _ = unsafe { raw_to_owned(raw) }; // drop it to close if it was open
-    }
 }
 
 // Make the conversion from raw fd to OnwedFd safer by checking that the fd is really present and
