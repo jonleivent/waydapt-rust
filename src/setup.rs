@@ -2,7 +2,6 @@ use crate::addons::IHMap;
 use crate::basics::Leaker;
 use crate::crate_traits::{Alloc, EventHandler};
 use crate::for_handlers::SessionInitHandler;
-#[cfg(feature = "forking")]
 use crate::forking::{daemonize, double_fork, ForkResult};
 use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
@@ -18,30 +17,27 @@ use signal::{SigSet, Signal};
 use std::collections::VecDeque;
 use std::env::Args;
 use std::io::{Error, ErrorKind, Result as IoResult};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
-    #[cfg(feature = "forking")]
     pub(crate) fork_sessions: bool,
     pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
-    #[cfg(feature = "forking")]
-    pub(crate) setsid: bool,
 }
 
 static MAIN_ID: OnceLock<(/*pid*/ u32, pthread::Pthread)> = OnceLock::new();
+static RAW_WFD: AtomicI32 = AtomicI32::new(-1);
+static RAW_EFD: AtomicI32 = AtomicI32::new(-1);
 
 pub(crate) fn startup(init_handlers: &IHMap) {
-    static W_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
-    static E_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
-
     let all_args = &mut std::env::args();
     let program = all_args.next().unwrap();
     let our_args = all_args.take_while(|a| a != "--");
@@ -92,12 +88,12 @@ pub(crate) fn startup(init_handlers: &IHMap) {
             let server_lock_pathbuf =
                 crate::listener::get_server_socket_path().with_extension("lock");
             let roptions = &options;
-            std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions, &W_THREAD));
+            std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf, roptions, &RAW_WFD));
         }
 
         if let Some(exit_lock_filename) = matches.opt_str("e") {
             let roptions = &options;
-            std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions, &E_THREAD));
+            std::thread::spawn(|| monitor_lock_file(exit_lock_filename, roptions, &RAW_EFD));
         }
 
         match crate::event_loop::event_loop(&mut socket_event_handler) {
@@ -116,18 +112,14 @@ pub(crate) fn startup(init_handlers: &IHMap) {
         // scope to end and the SocketEventHandler to get dropped, which closes its associated fds
     };
 
-    // In the forked child.  We have already removed most of what it doesn't need, except for the
-    // two monitor_lock_file threads - which we will now (try to) kill off:
+    // In the forked child.  We have already removed most unneeded resources (fds, threads). The
+    // ones that may be left over are the ones for the monitor_lock_file threads (which the forked
+    // child does not inherit), which we can close now (albeit unsafely):
+    close_raw_fd_after_fork(&RAW_WFD);
+    close_raw_fd_after_fork(&RAW_EFD);
 
-    // A race is remotely possible in each of these 2 cases between this thread and the target
-    // thread setting the OnceLock.  But, not killing the threads only results in a waste of
-    // resources in the forked clients in which they appear.  The monitor_lock_file is a no-op
-    // (other than the resource waste) in processes other than the initial one.
-    if let Some(e_thread) = E_THREAD.get() {
-        let _ = pthread::pthread_kill(*e_thread, Signal::SIGUSR1);
-    }
-    if let Some(w_thread) = W_THREAD.get() {
-        let _ = pthread::pthread_kill(*w_thread, Signal::SIGUSR1);
+    if matches.opt_present("s") {
+        let _ = rustix::process::setsid();
     }
 
     client_session(options, active_interfaces, session_handlers, client_stream);
@@ -194,12 +186,9 @@ fn print_version_info() {
 impl SharedOptions {
     fn new(matches: &Matches) -> &'static Self {
         let wo = Leaker.alloc(SharedOptions {
-            #[cfg(feature = "forking")]
             fork_sessions: matches.opt_present("c"),
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
-            #[cfg(feature = "forking")]
-            setsid: matches.opt_present("s"),
             debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
                 Ok("1") => 1,
                 Ok("client") => 2,
@@ -208,15 +197,10 @@ impl SharedOptions {
             },
         });
 
-        #[cfg(feature = "forking")]
         assert!(
             !(wo.terminate_after.is_some() && wo.fork_sessions),
             "-t and -c cannot be used together"
         );
-        #[cfg(feature = "forking")]
-        if wo.setsid {
-            assert!(wo.fork_sessions, "-s requres -c");
-        }
         wo
     }
 }
@@ -279,21 +263,18 @@ fn start_listening(matches: &Matches) -> SocketListener {
     // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
     if let Some(anti_lock_fd) = matches.opt_str("a") {
         let raw = anti_lock_fd.parse().expect("-a fd : must be an int");
-        let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-        // check that the fd is really something we own:
-        assert!(
-            rustix::fs::fstat(&owned).is_ok(),
-            "Anti-lock (-a) fd={raw} does not correspond to an open file or dir"
-        );
+        #[allow(unsafe_code)]
+        let Ok(owned) = (unsafe { raw_to_owned(raw) }) else {
+            panic!("Anti-lock (-a) fd={raw} does not correspond to an open file or dir");
+        };
         flock(owned, FlockOperation::Unlock).unwrap();
     };
 
     // If we've been told to daemonize, do so to allow subsequent clients to start that were waiting
     // for this parent process to exit:
-    #[cfg(feature = "forking")]
     if matches.opt_present("z") {
         unsafe { daemonize() }.unwrap();
-        rustix::process::setsid().unwrap();
+        let _ = rustix::process::setsid();
     }
 
     listener
@@ -308,7 +289,6 @@ fn get_options() -> Options {
         "file descriptor for waydapt to unlock when its socket is ready",
         "FILE-DESCRIPTOR",
     );
-    #[cfg(feature = "forking")]
     opts.optflag("c", "childprocs", "make client sessions child processes instead of threads");
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
     opts.optopt("e", "exitlock", "file to monitor for exiting when unlocked", "FILE");
@@ -334,15 +314,11 @@ fn get_options() -> Options {
     opts.optopt(
         "t",
         "terminate",
-        #[cfg(not(feature = "forking"))]
-        "terminate after last client and no others for secs",
-        #[cfg(feature = "forking")]
         "terminate after last client and no others for secs (can't be used with -c)",
         "SECS",
     );
     opts.optflag("v", "version", "Show version info and exit");
     opts.optflag("w", "watchserver", "Exit when server exits");
-    #[cfg(feature = "forking")]
     opts.optflag("z", "daemonize", "daemonize waydapt when its socket is ready");
     opts
 }
@@ -393,9 +369,6 @@ impl SocketEventHandler {
 
     fn in_child_after_fork(&mut self) {
         self.listener.prevent_removes_on_drop();
-        if self.options.setsid {
-            let _ = rustix::process::setsid();
-        }
         SigSet::all().thread_unblock().unwrap();
     }
 
@@ -403,7 +376,6 @@ impl SocketEventHandler {
         match self.listener.accept() {
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
             Ok((client_stream, _)) => {
-                #[cfg(feature = "forking")]
                 if self.options.fork_sessions {
                     #[allow(unsafe_code)]
                     if let ForkResult::Child = unsafe { double_fork() }.unwrap() {
@@ -457,19 +429,15 @@ pub(crate) fn terminate_main_thread() {
 }
 
 #[allow(unused)]
-fn monitor_lock_file(
-    path: impl AsRef<Path>, options: &'static SharedOptions, thread: &OnceLock<pthread::Pthread>,
-) {
-    thread.set(pthread::pthread_self()).unwrap();
+fn monitor_lock_file(path: impl AsRef<Path>, options: &'static SharedOptions, arfd: &AtomicI32) {
     let pathname = path.as_ref().to_str().unwrap();
     let lock_file = std::fs::File::open(&path).unwrap_or_else(|e| {
         eprintln!("Cannot open {pathname} : {e:?}");
         std::process::exit(1);
     });
-
+    arfd.store(lock_file.as_raw_fd(), Ordering::Relaxed);
     flock(&lock_file, FlockOperation::LockShared).unwrap_or_else(|e| {
         if e == rustix::io::Errno::INTR {
-            // this happens in forked child sessions, where we don't want to monitor lock files
             return;
         }
         eprintln!("Cannot flock {pathname} : {e:?}");
@@ -481,4 +449,23 @@ fn monitor_lock_file(
     }
     eprintln!("Exiting due to unlocked {pathname}");
     terminate_main_thread();
+}
+
+fn close_raw_fd_after_fork(arfd: &AtomicI32) {
+    #![allow(unsafe_code)]
+    let raw = arfd.load(Ordering::Relaxed);
+    if raw >= 0 {
+        let _ = unsafe { raw_to_owned(raw) }; // drop it to close if it was open
+    }
+}
+
+// Make the conversion from raw fd to OnwedFd safer by checking that the fd is really present and
+// open.  It still isn't a safe operation because it could be used to duplicate the OwnedFd on this
+// fd.
+unsafe fn raw_to_owned(rawfd: RawFd) -> IoResult<OwnedFd> {
+    #![allow(unsafe_code)]
+    unsafe {
+        rustix::fs::fstat(BorrowedFd::borrow_raw(rawfd))?;
+        Ok(OwnedFd::from_raw_fd(rawfd))
+    }
 }
