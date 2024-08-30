@@ -90,7 +90,7 @@ mod safeclip {
                     continue;
                 };
                 if request.name == "set_title" || has_mime_type_arg(request) {
-                    adder.request_push_front(iname, &request.name, add_prefix).unwrap();
+                    adder.request_push_back(iname, &request.name, add_prefix).unwrap();
                 }
             }
             // Add the remove_prefix handler to any event that has a mime_type arg

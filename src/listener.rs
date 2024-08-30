@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs::{remove_file, File, Metadata};
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -13,27 +13,19 @@ pub(crate) struct SocketListener {
     lock_path: PathBuf,
     #[allow(unused)]
     lock_file: File, // own this so that it drops (and so unlocks) with us
-    do_removes: bool,
 }
-
-// Using the pid test won't work because we might daemonize after creating the SocketListener.
-// Also, if we try to update the pid after daemonizing, that's too late because the socket and lock
-// file would get removed during the daemonization.  Instead, we have to
 
 impl Drop for SocketListener {
     fn drop(&mut self) {
-        if self.do_removes {
-            // Note that remove_file is never a truly safe operation because some other process may
-            // have taken over that path for its own use.  There is no Linux way to prevent this,
-            // however.  We could keep a fd to the enclosing dir and use unlinkat - that would
-            // prevent some cases of take-over (such as replacing the dir, or mounting over it), but
-            // not others.  It would be nice if Linux had a version of unlink that took a path AND
-            // some other proof that we have the right file, like a dev/inode pair, and verify
-            // atomically that the path and dev/inode pair refer to the same file before unlinking
-            // atomically with that verification.
-            remove_file(&self.socket_path).unwrap();
-            remove_file(&self.lock_path).unwrap();
-        }
+        // Note that remove_file is never a truly safe operation because some other process may have
+        // taken over that path for its own use.  There is no Linux way to prevent this, however.
+        // We could keep a fd to the enclosing dir and use unlinkat - that would prevent some cases
+        // of take-over (such as replacing the dir, or mounting over it), but not others.  It would
+        // be nice if Linux had a version of unlink that took a path AND some other proof that we
+        // have the right file, like a dev/inode pair, and verify atomically that the path and
+        // dev/inode pair refer to the same file before unlinking atomically with that verification.
+        remove_file(&self.socket_path).unwrap();
+        remove_file(&self.lock_path).unwrap();
     }
 }
 
@@ -57,22 +49,14 @@ impl SocketListener {
         }
         let unix_listener = UnixListener::bind(&socket_path).unwrap();
         unix_listener.set_nonblocking(true).unwrap();
-        Self { socket_path, unix_listener, lock_path, lock_file, do_removes: true }
+        Self { socket_path, unix_listener, lock_path, lock_file }
     }
-
-    #[allow(unused)]
-    pub(crate) fn prevent_removes_on_drop(&mut self) { self.do_removes = false; }
 }
 
 impl Deref for SocketListener {
     type Target = UnixListener;
     #[inline]
     fn deref(&self) -> &Self::Target { &self.unix_listener }
-}
-
-impl DerefMut for SocketListener {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.unix_listener }
 }
 
 fn metadata_eq(meta1: &Metadata, meta2: &Metadata) -> bool {

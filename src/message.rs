@@ -102,9 +102,9 @@ impl<'a> DemarshalledMessage<'a> {
         if id >= WL_SERVER_ID_START && self.msg_decl.is_wl_display_sync() {
             // TBD should we do the delete here?: Note that the C waydapt doesn't.  So we won't either.
 
-            //id_map.delete(id);
+            // id_map.delete(id);
 
-            //There's also the return handshake request, which is a sync with a high id that doesn't
+            // There's also the return handshake request, which is a sync with a high id that doesn't
             // exist.  But the delete method on id_maps does nothing if the id doesn't exist.
 
             // Note that, like the add_wl_registry_bind_new_id case, since we are pushing an arg

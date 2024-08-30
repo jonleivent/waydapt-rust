@@ -21,7 +21,9 @@ pub mod postparse;
 pub mod protocol;
 pub mod session;
 pub mod setup;
+pub mod socket_events;
 pub mod streams;
 pub mod terminator;
+pub mod version_info;
 
 fn main() { setup::startup(&addons::get_addon_handlers()) }

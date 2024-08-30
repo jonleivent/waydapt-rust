@@ -123,7 +123,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;
         let header = MessageHeader::new(in_msg);
-	debug_assert_eq!(header.msg_nwords(), in_msg.len());
+        debug_assert_eq!(header.msg_nwords(), in_msg.len());
         let interface = self.lookup(header.object_id);
         let msg_decl = interface.get_message(from_server, header.opcode as usize);
         if let Some(handlers) = msg_decl.handlers.get() {
@@ -148,12 +148,12 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
             // value if it is present:
             if let Some(interface) = msg_decl.new_id_interface.get() {
                 let id = Self::find_new_id(msg_decl, in_msg);
-		if id >= WL_SERVER_ID_START && msg_decl.is_wl_display_sync() {
-		    // this is the delete-id handshake reply in wayland-idfix - so no id to add -
-		    // see DemarshalledMessage::add_new_id for similar case.
-		} else {
+                if id < WL_SERVER_ID_START || !msg_decl.is_wl_display_sync() {
+                    // this is NOT the delete-id handshake reply in wayland-idfix - if it were,
+                    // there would be no id to add - see DemarshalledMessage::add_new_id for similar
+                    // case.
                     self.add(id, interface);
-		}
+                }
             } else {
                 // We can't use new_id_interface or find_new_id on wl_registry::bind, but we
                 // shouldn't need to, because it always has a builtin handler, hence will be handled
@@ -182,7 +182,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
                 Type::String | Type::Array => round4(data[i] as usize) / 4 + 1,
                 Type::Fd => 0,
             };
-	    i += inc;
+            i += inc;
         }
         panic!("No new_id arg found when one was expected for {msg_decl:?}")
     }

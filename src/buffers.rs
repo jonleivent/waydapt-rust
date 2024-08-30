@@ -173,12 +173,12 @@ impl<'a> OutBuffer<'a> {
         self.chunks.append(&mut new_end);
     }
 
-    #[inline]
-    fn is_empty(&self) -> bool {
-        #![allow(dead_code)]
-        // The whole OutBuffer is considered empty if its first chunk is empty
-        self.chunks.front().expect(MUST_HAVE1).is_empty()
-    }
+    // #[inline]
+    // fn is_empty(&self) -> bool {
+    //     #![allow(dead_code)]
+    //     // The whole OutBuffer is considered empty if its first chunk is empty
+    //     self.chunks.front().expect(MUST_HAVE1).is_empty()
+    // }
 
     #[inline]
     fn end(&self) -> &Chunk { self.chunks.back().expect(MUST_HAVE1) }
