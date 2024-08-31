@@ -16,6 +16,7 @@ use std::os::unix::net::UnixStream;
 pub(crate) struct SocketEventHandler {
     listener: SocketListener,
     signalfd: SignalFd,
+    server_stream: Option<UnixStream>,
     options: &'static SharedOptions,
     interfaces: &'static ActiveInterfaces,
     handlers: &'static VecDeque<SessionInitHandler>,
@@ -34,8 +35,9 @@ impl SocketEventHandler {
         mask.add(signal::SIGUSR1); // for terminate_main_thread
         mask.thread_block().unwrap();
         let signalfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK).unwrap();
+        let server_stream = options.watch_server.then(crate::session::get_server_stream);
 
-        SocketEventHandler { listener, signalfd, options, interfaces, handlers }
+        SocketEventHandler { listener, signalfd, server_stream, options, interfaces, handlers }
     }
 
     fn spawn_session(&self, client_stream: UnixStream) {
@@ -71,6 +73,16 @@ impl SocketEventHandler {
         self.spawn_session(client_stream);
         Ok(None)
     }
+
+    fn handle_server_input(&mut self) -> IoResult<Option<()>> {
+        #![allow(clippy::unused_self)]
+        #![allow(clippy::unnecessary_wraps)]
+        assert!(self.server_stream.is_some());
+        // We are only listening on this server_stream to detect when the server exits.  There will
+        // be a HUP error as well, but we'll get an input event first here.
+        eprintln!("Server terminated connection");
+        Ok(Some(())) // stop the event loop
+    }
 }
 
 impl EventHandler for SocketEventHandler {
@@ -78,13 +90,19 @@ impl EventHandler for SocketEventHandler {
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         let flags = EventFlags::IN; // level triggered
-        [(self.listener.as_fd(), flags), (self.signalfd.as_fd(), flags)].into_iter()
+        let mut v = vec![(self.listener.as_fd(), flags), (self.signalfd.as_fd(), flags)];
+        if let Some(ref server_stream) = self.server_stream {
+            v.push((server_stream.as_fd(), flags));
+            // EventFlags::empty() also works, but then we only get the HUP, not any input
+        }
+        v.into_iter()
     }
 
     fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<()>> {
         match fd_index {
             0 => self.handle_listener_input(),
             1 => self.handle_signal_input(),
+            2 => self.handle_server_input(), // for -w option
             _ => unreachable!(),
         }
     }

@@ -111,6 +111,16 @@ const FAKE_UCRED: rustix::net::UCred = rustix::net::UCred {
     gid: rustix::process::Gid::ROOT,
 };
 
+pub(crate) fn get_server_stream() -> UnixStream {
+    let server_socket_path = crate::listener::get_server_socket_path();
+    UnixStream::connect(server_socket_path).unwrap_or_else(|e| {
+        panic!(
+            "Cannot connect to Wayland server through socket {:?}:\n{e:?}",
+            server_socket_path.as_path()
+        )
+    })
+}
+
 // For errors that should kill off the process even if in multithreaded mode, call
 // multithread_exit if options.fork_sessions is false (which indicates multithreaded mode).
 // Otherwise panic or quivalent (unwrap).  Everything in here should just panic:
@@ -121,8 +131,6 @@ pub(crate) fn client_session(
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
     use std::io::ErrorKind;
-
-    let server_socket_path = crate::listener::get_server_socket_path();
 
     // This function will own both streams - so do the following trivial assignment for
     // client_stream to avoid clippy complaint.  The reason is that it is difficult for Session to
@@ -138,12 +146,7 @@ pub(crate) fn client_session(
     // Consider a case where the wayland server's socket was deleted.  That should only prevent
     // future clients from connecting, it should not cause existing clients to exit.  So panic
     // instead of multithread_exit:
-    let server_stream = UnixStream::connect(server_socket_path).unwrap_or_else(|e| {
-        panic!(
-            "Cannot connect {pid:?} to Wayland server through socket {:?}:\n{e:?}",
-            server_socket_path.as_path()
-        )
-    });
+    let server_stream = get_server_stream();
 
     let init_info = InitInfo { ucred, active_interfaces, options };
 

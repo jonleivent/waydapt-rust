@@ -14,7 +14,7 @@ use std::env::Args;
 use std::io::{ErrorKind, Result as IoResult};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::os::unix::io::{FromRawFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ pub(crate) struct SharedOptions {
     pub(crate) terminate_after: Option<Duration>,
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
+    pub(crate) watch_server: bool,
 }
 
 static MAIN_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
@@ -69,18 +70,6 @@ pub(crate) fn startup(init_handlers: &IHMap) {
     let mut socket_event_handler =
         SocketEventHandler::new(listener, options, active_interfaces, session_handlers);
 
-    // Creating the SocketEventHandler establishes the signal mask and signalfd, allowing
-    // termination signals from the following threads to be processed correctly:
-
-    if matches.opt_present("w") {
-        let server_lock_pathbuf = crate::listener::get_server_socket_path().with_extension("lock");
-        std::thread::spawn(|| monitor_lock_file(server_lock_pathbuf));
-    }
-
-    if let Some(exit_lock_filename) = matches.opt_str("e") {
-        std::thread::spawn(|| monitor_lock_file(exit_lock_filename));
-    }
-
     // accept new clients
     match crate::event_loop::event_loop(&mut socket_event_handler) {
         Ok(()) => eprintln!("Normal termination"),
@@ -101,11 +90,12 @@ impl SharedOptions {
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
             debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
-                Ok("1") => 1,
-                Ok("client") => 2,
-                Ok("server") => 3,
+                Ok("1" | "all" | "both") => 1,
+                Ok("2" | "client") => 2,
+                Ok("3" | "server") => 3,
                 _ => 0,
             },
+            watch_server: matches.opt_present("w"),
         })
     }
 }
@@ -180,7 +170,7 @@ fn get_options() -> Options {
         "FILE-DESCRIPTOR",
     );
     opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
-    opts.optopt("e", "exitlock", "file to monitor for exiting when unlocked", "FILE");
+    //opts.optopt("e", "exitlock", "file to monitor for exiting when unlocked", "FILE");
     opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
     opts.optopt(
         "g",
@@ -213,23 +203,6 @@ pub(crate) fn terminate_main_thread() {
     );
 
     pthread::pthread_kill(*main_thread, Signal::SIGUSR1).unwrap();
-}
-
-fn monitor_lock_file(path: impl AsRef<Path>) {
-    let pathname = path.as_ref().to_str().unwrap();
-    let lock_file = std::fs::File::open(&path).unwrap_or_else(|e| {
-        eprintln!("Cannot open {pathname} : {e:?}");
-        std::process::exit(1);
-    });
-    flock(&lock_file, FlockOperation::LockShared).unwrap_or_else(|e| {
-        if e == rustix::io::Errno::INTR {
-            return;
-        }
-        eprintln!("Cannot flock {pathname} : {e:?}");
-        std::process::exit(1);
-    });
-    eprintln!("Exiting due to unlocked {pathname}");
-    terminate_main_thread();
 }
 
 // Make the conversion from raw fd to OnwedFd safer by checking that the fd is really present and
