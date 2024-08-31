@@ -17,6 +17,7 @@ use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::{fs::File, io::BufWriter};
 
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
@@ -134,7 +135,6 @@ fn globals_and_handlers(
 
     // Dump the protocol and handler info if asked:
     if let Some(protocol_output_filename) = matches.opt_str("o") {
-        use std::{fs::File, io::BufWriter};
         let mut out = BufWriter::new(File::create(protocol_output_filename).unwrap());
         active_interfaces.dump(&mut out).unwrap();
     }

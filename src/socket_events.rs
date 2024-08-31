@@ -48,7 +48,7 @@ impl SocketEventHandler {
         std::thread::spawn(session);
     }
 
-    fn handle_signal_input(&mut self) -> IoResult<Option<()>> {
+    fn handle_signal_input(&self) -> IoResult<Option<()>> {
         #[allow(clippy::cast_possible_wrap)]
         let sig = match self.signalfd.read_signal() {
             Ok(Some(ref sig)) => sig.ssi_signo as i32,
@@ -64,7 +64,7 @@ impl SocketEventHandler {
         }
     }
 
-    fn handle_listener_input(&mut self) -> IoResult<Option<()>> {
+    fn handle_listener_input(&self) -> IoResult<Option<()>> {
         let client_stream = match self.listener.accept() {
             Ok((client_stream, _)) => client_stream,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
@@ -74,7 +74,7 @@ impl SocketEventHandler {
         Ok(None)
     }
 
-    fn handle_server_input(&mut self) -> IoResult<Option<()>> {
+    fn handle_server_input(&self) -> IoResult<Option<()>> {
         #![allow(clippy::unused_self)]
         #![allow(clippy::unnecessary_wraps)]
         assert!(self.server_stream.is_some());
