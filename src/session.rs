@@ -53,22 +53,19 @@ impl<'a> EventHandler for Session<'a> {
         let (source_side, dest_side) = (index, 1 - index);
         let inbuf = &mut self.in_buffers[source_side];
         let outbuf = &mut self.out_buffers[dest_side];
-        let mut total_msg_count = 0u32;
+        let mut received = false;
 
         while inbuf.receive()? > 0 {
             // We expect that at least one whole msg is received.  But we can handle things if
             // that's not the case.
-            let mut msg_count = 0u32;
             while let Some((msg, fds)) = inbuf.try_pop() {
-                msg_count += 1;
+                received = true;
                 // We need to pass index into handle so it knows whether the msg is a request or event.
                 self.mediator.mediate(source_side, msg, fds, outbuf)?;
             }
-            //debug_assert!(msg_count > 0);
-            total_msg_count += msg_count;
         }
 
-        if total_msg_count > 0 {
+        if received {
             // Force flush because we don't know when we will be back here, so waiting to
             // flush any part might starve the receiver.
             outbuf.flush(true)?;
@@ -90,13 +87,13 @@ impl<'a> EventHandler for Session<'a> {
 
 #[derive(Debug)]
 struct InitInfo {
-    ucred: rustix::net::UCred,
+    ucred: Option<rustix::net::UCred>,
     active_interfaces: &'static ActiveInterfaces,
     options: &'static crate::setup::SharedOptions,
 }
 
 impl SessionInitInfo for InitInfo {
-    fn ucred(&self) -> rustix::net::UCred { self.ucred }
+    fn ucred(&self) -> Option<rustix::net::UCred> { self.ucred }
 
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces { self.active_interfaces }
 
@@ -104,12 +101,6 @@ impl SessionInitInfo for InitInfo {
 
     fn get_debug_level(&self) -> u32 { self.options.debug_level }
 }
-
-const FAKE_UCRED: rustix::net::UCred = rustix::net::UCred {
-    pid: rustix::process::Pid::INIT,
-    uid: rustix::process::Uid::ROOT,
-    gid: rustix::process::Gid::ROOT,
-};
 
 pub(crate) fn get_server_stream() -> UnixStream {
     let server_socket_path = crate::listener::get_server_socket_path();
@@ -137,17 +128,8 @@ pub(crate) fn client_session(
     // own the streams because it also needs references to those streams from its buffers, and
     // owning something while also referencing it is not Rusty.
     let client_stream = client_stream;
-
-    // When would get_socket_peercred ever fail, given that we know the arg is correct?
-    // Probably never.  Does it matter then how we handle it?:
-    let ucred = get_socket_peercred(&client_stream).unwrap_or(FAKE_UCRED);
-    let pid = ucred.pid;
-
-    // Consider a case where the wayland server's socket was deleted.  That should only prevent
-    // future clients from connecting, it should not cause existing clients to exit.  So panic
-    // instead of multithread_exit:
+    let ucred = get_socket_peercred(&client_stream).ok();
     let server_stream = get_server_stream();
-
     let init_info = InitInfo { ucred, active_interfaces, options };
 
     // options.terminate can only be Some(duration) if options.fork_sessions is false, meaning we
@@ -161,6 +143,7 @@ pub(crate) fn client_session(
     let mut session = Session::new(&init_info, [&client_stream, &server_stream]);
 
     if let Err(e) = crate::event_loop::event_loop(&mut session) {
+        let pid = ucred.map(|c| c.pid);
         match e.kind() {
             ErrorKind::ConnectionReset => eprintln!("Connection reset for {pid:?}: {e:?}"),
             ErrorKind::ConnectionAborted => eprintln!("Connection aborted for {pid:?}: {e:?}"),

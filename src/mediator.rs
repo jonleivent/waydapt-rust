@@ -79,7 +79,7 @@ impl<'a, S: SessionInitInfo> SessionInitInfo for Mediator<'a, S> {
     #![allow(clippy::inline_always)]
 
     #[inline(always)]
-    fn ucred(&self) -> rustix::net::UCred { self.init_info.ucred() }
+    fn ucred(&self) -> Option<rustix::net::UCred> { self.init_info.ucred() }
 
     #[inline(always)]
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
@@ -194,33 +194,35 @@ mod debug {
     use super::{DemarshalledMessage, Mediator, Message, MessageHeader};
 
     impl<'a, S: SessionInitInfo> Mediator<'a, S> {
+        fn pidstr(&self) -> String {
+            if let Some(c) = self.init_info.ucred() {
+                format!("[{}]", c.pid.as_raw_nonzero())
+            } else {
+                String::new()
+            }
+        }
+
         fn eprint_flow_unified(&self, from_server: bool) {
             if from_server {
-                eprint!(
-                    "server->waydapt->client[{}] ",
-                    self.init_info.ucred().pid.as_raw_nonzero()
-                );
+                eprint!("server->waydapt->client{} ", self.pidstr());
             } else {
-                eprint!(
-                    "client[{}]->waydapt->server ",
-                    self.init_info.ucred().pid.as_raw_nonzero()
-                );
+                eprint!("client{}->waydapt->server ", self.pidstr());
             }
         }
 
         fn eprint_flow_in(&self, from_server: bool) {
             if from_server {
-                eprint!("server->waydapt[{}] ", self.init_info.ucred().pid.as_raw_nonzero());
+                eprint!("server->waydapt{} ", self.pidstr());
             } else {
-                eprint!("client[{}]->waydapt ", self.init_info.ucred().pid.as_raw_nonzero());
+                eprint!("client{}->waydapt ", self.pidstr());
             }
         }
 
         fn eprint_flow_out(&self, from_server: bool) {
             if from_server {
-                eprint!("waydapt->client[{}] ", self.init_info.ucred().pid.as_raw_nonzero());
+                eprint!("waydapt->client{} ", self.pidstr());
             } else {
-                eprint!("waydapt[{}]->server ", self.init_info.ucred().pid.as_raw_nonzero());
+                eprint!("waydapt{}->server ", self.pidstr());
             }
         }
 

@@ -77,13 +77,13 @@ pub(crate) fn startup(init_handlers: &IHMap) {
         crate::event_loop::event_loop(&mut socket_event_handler)
     };
     match res {
-        Ok(client_stream) => client_session(options, interfaces, handlers, client_stream),
+        Ok(client_stream) => client_session(options, interfaces, handlers, client_stream), // -s
         Err(e) => match (e.kind(), e.into_inner()) {
             (ErrorKind::Interrupted, Some(i)) => eprintln!("Interrupted with {i}"),
             (ErrorKind::Interrupted, None) => eprintln!("Interrupted"),
-            (ErrorKind::Other, Some(i)) => eprintln!("Normal termination: {i:?}"),
+            (ErrorKind::Other, Some(i)) => eprintln!("Normal termination: {i}"),
             (ErrorKind::Other, None) => eprintln!("Normal termination"),
-            (k, Some(i)) => panic!("{k}: {i:?}"),
+            (k, Some(i)) => panic!("{k}: {i}"),
             (k, None) => panic!("{k}"),
         },
     };
@@ -111,7 +111,7 @@ impl SharedOptions {
     }
 }
 
-// Construct a single iterator over all protocol files and protocol directories
+// Construct a single iterator over all protocol files and protocol directories.
 fn protocol_file_iter<'a>(
     files: &'a [String], dirs: &'a [String],
 ) -> impl Iterator<Item = PathBuf> + 'a {
@@ -119,6 +119,7 @@ fn protocol_file_iter<'a>(
         std::fs::read_dir(d).unwrap().filter_map(|f| {
             let f = f.unwrap().path();
             match f.extension() {
+                // only files with xml extension in protocol dirs:
                 Some(e) if e.to_ascii_lowercase() == "xml" => Some(f),
                 _ => None,
             }
@@ -131,16 +132,11 @@ fn globals_and_handlers(
 ) -> (&'static ActiveInterfaces, &'static SessionHandlers) {
     let protocol_files = matches.opt_strs("p");
     let protocol_dirs = matches.opt_strs("P");
-    // This iterator produces all protocol files, individuals first, then dirs.  It assumes that
-    // an individual file is always a protocol file even if it does not have the .xml extension,
-    // but it filters directory content for only files that have the .xml extension:
     let all_protocol_files = protocol_file_iter(&protocol_files, &protocol_dirs);
-
     let globals_filename =
         matches.opt_str("g").expect("-g required globals file option is missing");
     let allow_missing = matches.opt_present("m");
     let active_interfaces = active_interfaces(all_protocol_files, &globals_filename, allow_missing);
-
     let session_handlers = gather_handlers(all_args, init_handlers, active_interfaces);
 
     // Dump the protocol and handler info if asked:
@@ -159,7 +155,7 @@ fn start_listening(matches: &Matches) -> SocketListener {
 
     // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
     if let Some(anti_lock_fd) = matches.opt_str("a") {
-        let raw = anti_lock_fd.parse().expect("-a fd : must be an int");
+        let raw = anti_lock_fd.parse().expect("-a fd : must be an i32");
         #[allow(unsafe_code)]
         let Ok(owned) = (unsafe { raw_to_owned(raw) }) else {
             panic!("Anti-lock (-a) fd={raw} does not correspond to an open file or dir");
@@ -172,37 +168,36 @@ fn start_listening(matches: &Matches) -> SocketListener {
 
 fn get_options() -> Options {
     let mut opts = Options::new();
-    opts.parsing_style(ParsingStyle::StopAtFirstFree);
-    opts.optopt(
-        "a",
-        "antilock",
-        "file descriptor for waydapt to unlock when its socket is ready",
-        "FILE-DESCRIPTOR",
-    );
-    opts.optopt("d", "display", "the name of the Wayland display socket to create", "NAME");
-    //opts.optopt("e", "exitlock", "file to monitor for exiting when unlocked", "FILE");
-    opts.optflag("f", "flushsends", "send every message immediately, instead of batching them");
-    opts.optopt(
-        "g",
-        "globals",
-        "file with one allowed global interface and max version per line",
-        "FILE",
-    );
-    opts.optflag("h", "help", "print this help");
-    opts.optflag("l", "list", "list available addon modules");
-    opts.optflag("m", "allowmissing", "allow global entries that don't appear in protocol files");
-    opts.optopt("o", "output", "dump processed protocol and handler info to file", "FILE");
-    opts.optmulti("p", "protofile", "a protocol XML file (can appear multiple times)", "FILE");
-    opts.optmulti(
-        "P",
-        "protodir",
-        "a directory of protocol XML files (can appear multiple times)",
-        "DIR",
-    );
-    opts.optflag("s", "single", "Accept only one client");
-    opts.optopt("t", "terminate", "terminate after last client and no others for secs", "SECS");
-    opts.optflag("v", "version", "show version info and exit");
-    opts.optflag("w", "watchserver", "exit when server exits");
+    opts.parsing_style(ParsingStyle::StopAtFirstFree)
+        .optopt(
+            "a",
+            "antilock",
+            "file descriptor for waydapt to unlock when its socket is ready",
+            "FILE-DESCRIPTOR",
+        )
+        .optopt("d", "display", "the name of the Wayland display socket to create", "NAME")
+        .optflag("f", "flushsends", "send every message immediately, instead of batching them")
+        .optopt(
+            "g",
+            "globals",
+            "file with one allowed global interface and max version per line",
+            "FILE",
+        )
+        .optflag("h", "help", "print this help")
+        .optflag("l", "list", "list available addon modules")
+        .optflag("m", "allowmissing", "allow global entries that don't appear in protocol files")
+        .optopt("o", "output", "dump processed protocol and handler info to file", "FILE")
+        .optmulti("p", "protofile", "a protocol XML file (can appear multiple times)", "FILE")
+        .optmulti(
+            "P",
+            "protodir",
+            "a directory of protocol XML files (can appear multiple times)",
+            "DIR",
+        )
+        .optflag("s", "single", "Accept only one client")
+        .optopt("t", "terminate", "terminate after last client and no others for secs", "SECS")
+        .optflag("v", "version", "show version info and exit")
+        .optflag("w", "watchserver", "exit when server exits");
     opts
 }
 

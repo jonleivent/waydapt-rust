@@ -18,7 +18,7 @@ pub trait MessageInfo<'a> {
 pub type RInterface = &'static Interface<'static>;
 
 pub trait SessionInitInfo {
-    fn ucred(&self) -> rustix::net::UCred;
+    fn ucred(&self) -> Option<rustix::net::UCred>;
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces;
     fn get_display(&self) -> RInterface; // wl_display
     fn get_debug_level(&self) -> u32;

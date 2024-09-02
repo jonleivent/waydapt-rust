@@ -48,19 +48,22 @@ impl SocketEventHandler {
         std::thread::spawn(session);
     }
 
+    fn err_for_signo(signo: i32) -> Error {
+        if signo == signal::SIGUSR1 as i32 {
+            Error::other("Internal signal")
+        } else if let Ok(signal) = Signal::try_from(signo) {
+            Error::new(ErrorKind::Interrupted, signal.as_ref())
+        } else {
+            Error::from(ErrorKind::Interrupted)
+        }
+    }
+
     fn handle_signal_input(&self) -> IoResult<Option<UnixStream>> {
         #[allow(clippy::cast_possible_wrap)]
-        let sig = match self.signalfd.read_signal() {
-            Ok(Some(ref sig)) => sig.ssi_signo as i32,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        if sig == signal::SIGUSR1 as i32 {
-            Err(Error::other("Internal signal")) // use SIGUSR1 for normal termination
-        } else {
-            let signal = Signal::try_from(sig).unwrap();
-            let err = Error::new(ErrorKind::Interrupted, signal.as_ref());
-            Err(err)
+        match self.signalfd.read_signal() {
+            Ok(Some(ref sig)) => Err(Self::err_for_signo(sig.ssi_signo as i32)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -79,19 +82,10 @@ impl SocketEventHandler {
             Ok(None)
         }
     }
-
-    fn handle_server_input(&self) -> IoResult<Option<UnixStream>> {
-        #![allow(clippy::unused_self)]
-        #![allow(clippy::unnecessary_wraps)]
-        assert!(self.server_stream.is_some());
-        // We are only listening on this server_stream to detect when the server exits.  There will
-        // be a HUP error as well, but we'll get an input event first here.
-        Err(Error::other("Server terminated connection")) // stop the event loop
-    }
 }
 
 impl Drop for SocketEventHandler {
-    fn drop(&mut self) { SigSet::all().thread_unblock().unwrap(); }
+    fn drop(&mut self) { let _ = SigSet::all().thread_unblock(); }
 }
 
 impl EventHandler for SocketEventHandler {
@@ -111,7 +105,7 @@ impl EventHandler for SocketEventHandler {
         match fd_index {
             0 => self.handle_listener_input(),
             1 => self.handle_signal_input(),
-            2 => self.handle_server_input(), // for -w option
+            2 => Err(Error::other("Server terminated connection")), // for -w option
             _ => unreachable!(),
         }
     }
