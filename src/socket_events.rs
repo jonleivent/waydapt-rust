@@ -48,7 +48,7 @@ impl SocketEventHandler {
         std::thread::spawn(session);
     }
 
-    fn handle_signal_input(&self) -> IoResult<Option<()>> {
+    fn handle_signal_input(&self) -> IoResult<Option<UnixStream>> {
         #[allow(clippy::cast_possible_wrap)]
         let sig = match self.signalfd.read_signal() {
             Ok(Some(ref sig)) => sig.ssi_signo as i32,
@@ -56,7 +56,7 @@ impl SocketEventHandler {
             Err(e) => return Err(e.into()),
         };
         if sig == signal::SIGUSR1 as i32 {
-            Ok(Some(())) // use SIGUSR1 for normal termination
+            Err(Error::other("Internal signal")) // use SIGUSR1 for normal termination
         } else {
             let signal = Signal::try_from(sig).unwrap();
             let err = Error::new(ErrorKind::Interrupted, signal.as_ref());
@@ -64,29 +64,38 @@ impl SocketEventHandler {
         }
     }
 
-    fn handle_listener_input(&self) -> IoResult<Option<()>> {
+    fn handle_listener_input(&self) -> IoResult<Option<UnixStream>> {
         let client_stream = match self.listener.accept() {
             Ok((client_stream, _)) => client_stream,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
             Err(e) => return Err(e),
         };
-        self.spawn_session(client_stream);
-        Ok(None)
+        if self.options.single_mode {
+            // let the top-level in setup run the client session after the socket and epoll fds are closed:
+            Ok(Some(client_stream))
+        } else {
+            // spawn the client session and allow the event handler to continue:
+            self.spawn_session(client_stream);
+            Ok(None)
+        }
     }
 
-    fn handle_server_input(&self) -> IoResult<Option<()>> {
+    fn handle_server_input(&self) -> IoResult<Option<UnixStream>> {
         #![allow(clippy::unused_self)]
         #![allow(clippy::unnecessary_wraps)]
         assert!(self.server_stream.is_some());
         // We are only listening on this server_stream to detect when the server exits.  There will
         // be a HUP error as well, but we'll get an input event first here.
-        eprintln!("Server terminated connection");
-        Ok(Some(())) // stop the event loop
+        Err(Error::other("Server terminated connection")) // stop the event loop
     }
 }
 
+impl Drop for SocketEventHandler {
+    fn drop(&mut self) { SigSet::all().thread_unblock().unwrap(); }
+}
+
 impl EventHandler for SocketEventHandler {
-    type InputResult = ();
+    type InputResult = UnixStream;
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         let flags = EventFlags::IN; // level triggered
@@ -98,7 +107,7 @@ impl EventHandler for SocketEventHandler {
         v.into_iter()
     }
 
-    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<()>> {
+    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<UnixStream>> {
         match fd_index {
             0 => self.handle_listener_input(),
             1 => self.handle_signal_input(),

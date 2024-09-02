@@ -4,6 +4,7 @@ use crate::crate_traits::Alloc;
 use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
 use crate::postparse::{active_interfaces, ActiveInterfaces};
+use crate::session::client_session;
 use crate::socket_events::SocketEventHandler;
 use getopts::{Matches, Options, ParsingStyle};
 use nix::sys::pthread;
@@ -25,6 +26,7 @@ pub(crate) struct SharedOptions {
     pub(crate) debug_level: u32,
     pub(crate) flush_every_send: bool,
     pub(crate) watch_server: bool,
+    pub(crate) single_mode: bool,
 }
 
 static MAIN_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
@@ -59,35 +61,37 @@ pub(crate) fn startup(init_handlers: &IHMap) {
     let options = SharedOptions::new(&matches);
 
     // do all protocol and globals parsing, and handler linkups:
-    let (active_interfaces, session_handlers) =
-        globals_and_handlers(&matches, all_args, init_handlers);
-
-    // Start listening on the socket for our clients:
-    let listener = start_listening(&matches);
+    let (interfaces, handlers) = globals_and_handlers(&matches, all_args, init_handlers);
 
     // Keep global track of this main thread for signalling purposes
     MAIN_THREAD.set(pthread::pthread_self()).unwrap();
 
-    let mut socket_event_handler =
-        SocketEventHandler::new(listener, options, active_interfaces, session_handlers);
+    let res = {
+        // Start listening on the socket for our clients:
+        let listener = start_listening(&matches);
 
-    // accept new clients
-    match crate::event_loop::event_loop(&mut socket_event_handler) {
-        Ok(()) => eprintln!("Normal termination"),
-        Err(e) if e.kind() == ErrorKind::Interrupted => {
-            if let Some(e) = e.into_inner() {
-                eprintln!("Interrupted with {e}");
-            } else {
-                eprintln!("Interrupted");
-            }
-        }
-        Err(e) => panic!("{e}"),
-    }
+        let mut socket_event_handler =
+            SocketEventHandler::new(listener, options, interfaces, handlers);
+
+        // accept new clients
+        crate::event_loop::event_loop(&mut socket_event_handler)
+    };
+    match res {
+        Ok(client_stream) => client_session(options, interfaces, handlers, client_stream),
+        Err(e) => match (e.kind(), e.into_inner()) {
+            (ErrorKind::Interrupted, Some(i)) => eprintln!("Interrupted with {i}"),
+            (ErrorKind::Interrupted, None) => eprintln!("Interrupted"),
+            (ErrorKind::Other, Some(i)) => eprintln!("Normal termination: {i:?}"),
+            (ErrorKind::Other, None) => eprintln!("Normal termination"),
+            (k, Some(i)) => panic!("{k}: {i:?}"),
+            (k, None) => panic!("{k}"),
+        },
+    };
 }
 
 impl SharedOptions {
     fn new(matches: &Matches) -> &'static Self {
-        Leaker.alloc(SharedOptions {
+        let so = Leaker.alloc(SharedOptions {
             terminate_after: matches.opt_str("t").map(|t| Duration::from_secs(t.parse().unwrap())),
             flush_every_send: matches.opt_present("f"),
             debug_level: match std::env::var("WAYLAND_DEBUG").as_ref().map(String::as_str) {
@@ -97,7 +101,13 @@ impl SharedOptions {
                 _ => 0,
             },
             watch_server: matches.opt_present("w"),
-        })
+            single_mode: matches.opt_present("s"),
+        });
+        assert!(
+            !(so.terminate_after.is_some() && so.single_mode),
+            "-t and -s are mutually exclusive"
+        );
+        so
     }
 }
 
@@ -189,9 +199,10 @@ fn get_options() -> Options {
         "a directory of protocol XML files (can appear multiple times)",
         "DIR",
     );
+    opts.optflag("s", "single", "Accept only one client");
     opts.optopt("t", "terminate", "terminate after last client and no others for secs", "SECS");
-    opts.optflag("v", "version", "Show version info and exit");
-    opts.optflag("w", "watchserver", "Exit when server exits");
+    opts.optflag("v", "version", "show version info and exit");
+    opts.optflag("w", "watchserver", "exit when server exits");
     opts
 }
 
