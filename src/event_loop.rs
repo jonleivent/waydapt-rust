@@ -27,7 +27,11 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::
     debug_assert!(count > 0);
     let mut events = EventVec::with_capacity(count); // would longer help?
     loop {
-        epoll::wait(&epoll_fd, &mut events, -1)?;
+        match epoll::wait(&epoll_fd, &mut events, -1) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(e.into()),
+        }
         // should never occur with no timeout:
         assert!(!events.is_empty(), "Got 0 events from epoll::wait");
         for Event { flags, data } in &events {
