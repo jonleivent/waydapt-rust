@@ -5,8 +5,11 @@ edition = "2021"
 build = "build.rs"
 
 [features]
-nolinkedlist = []
-
+no_linked_list = []
+always_compact = []
+fast_compact = []
+limit_sends = []
+default = [ "limit_sends", "always_compact" ]
 
 [dependencies]
 arrayvec = "0.7.4"

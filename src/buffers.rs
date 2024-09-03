@@ -4,11 +4,15 @@ use crate::header::{get_msg_nwords, MessageHeader};
 use crate::streams::{recv_msg, send_msg, IOStream};
 use arrayvec::ArrayVec;
 use rustix::fd::BorrowedFd;
-#[cfg(not(feature = "nolinkedlist"))]
+#[cfg(not(feature = "no_linked_list"))]
 use std::collections::LinkedList;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
+
+const LIMIT_SENDS_TO_MAX_WORDS_OUT: bool = cfg!(feature = "limit_sends");
+const FAST_COMPACT: bool = cfg!(feature = "fast_compact");
+const ALWAYS_COMPACT: bool = cfg!(feature = "always_compact");
 
 #[derive(Debug)]
 pub(crate) struct InBuffer<'a> {
@@ -48,7 +52,7 @@ impl<'a> InBuffer<'a> {
     }
 
     pub(crate) fn receive(&mut self) -> IoResult<usize> {
-        self.compact();
+        self.make_room();
         debug_assert!(self.back <= MAX_WORDS_OUT);
         // if we have more than MAX_WORDS_OUT available storage, should we allow receive to use it?
         // That might cause problems with fds - if we receive too much, we might leave fds in the
@@ -65,40 +69,58 @@ impl<'a> InBuffer<'a> {
         Ok(amount_read)
     }
 
-    // Compaction that is more than a no-op is rare.  It requies that we did not consume the
-    // previous input completely before receiving more.  Because we consume all complete messages
-    // before requesting more input from the kernel socket, the only way we would not have consumed
-    // the previous input is if the last message was only partially received.  And that is rare
-    // because Wayland clients and servers use all-or-nothing sends of chunks, so only messages that
-    // span chunks can be partially received.  Since a Wayland chunk is 4K, and messages are on the
-    // order of 16 bytes, only about half a percent of messages could be subject to being partially
-    // received.  Even then, the no overlap case is much more likely than the overlap case below
-    // because of the small message sizes relative to the chunk size.
+    // Make sure there's room to receive new message(s).  We need MAX_WORDS_OUT space, since that's
+    // the most content we'd ever get in a single receive.
+    fn make_room(&mut self) {
+        let len = self.back - self.front; // existing content
+        debug_assert!(len <= MAX_WORDS_OUT);
+        if len > 0 {
+            // there's some content
+            if ALWAYS_COMPACT || self.back > MAX_WORDS_OUT {
+                // and a reason to move it
+                self.compact();
+            }
+        } else {
+            // we're empty - just reset front and back
+            self.back = 0;
+            self.front = 0;
+        }
+        debug_assert!(self.data[self.back..].len() >= MAX_WORDS_OUT);
+    }
+
+    // Compaction is rare.  It requies that we did not consume the previous input completely before
+    // receiving more.  Because we consume all complete messages before requesting more input from
+    // the kernel socket, the only way we would not have consumed the previous input is if the last
+    // message was only partially received.  And that is rare because Wayland clients and servers
+    // use all-or-nothing sends of chunks, so only messages that span chunks can be partially
+    // received.  Since a Wayland chunk is 4K, and messages are on the order of 16 bytes, only about
+    // half a percent of messages could be subject to being partially received.  Even then, senders
+    // will rarely batch enough messages together to reach that point.
+    #[cold]
     fn compact(&mut self) {
+        let len = self.back - self.front;
         // Doing a compaction ensures that self.data[self.back..] is big enough to hold a max-sized
         // message, which is MAX_WORDS_OUT.  We don't use a ring buffer (like C libwayland) because
-        // the savings of not doing any compaction copy is more than offset by the added complexity
-        // of dealing with string or array message args that wrap.
-        let len = self.back - self.front;
-        debug_assert!(len <= MAX_WORDS_OUT);
-        // Compacting more often than absolutely necessary has a cost, but it may improve CPU
-        // cache friendliness.
-        if len == 0 {
-            // nothing to move, just reset front and back
-        } else if self.front >= len // no overlap
-            && (self.back > MAX_WORDS_OUT || COMPACT_SCHEME == CompactScheme::Eager)
-        {
-            // we have to, or at least want to (because eager) compact now, and can use memcpy
-            // because no overlap between source and destination:
+        // the savings of not doing any compaction (which is already exceedingly are) is more than
+        // offset by the added complexity of dealing with string or array message args that wrap in
+        // a ring buffer.
+        if self.front >= len && FAST_COMPACT {
+            // we can use memcpy because no overlap between source and destination:
             let (left, right) = self.data.split_at_mut(self.front);
             left[..len].copy_from_slice(&right[..len]);
-        } else if self.back > MAX_WORDS_OUT {
-            // we have to compact now, but there is an overlap, so use memmove:
-            self.data.copy_within(self.front..self.back, 0);
         } else {
-            // don't compact at all
-            debug_assert!(self.data[self.back..].len() >= MAX_WORDS_OUT);
-            return;
+            // there is an overlap, so use memmove:
+            //
+            // All compaction is rare, and this case is the rarest form of compaction.  It has
+            // self.front < len, which means the partial message [self.front..self.back] is either
+            // partial because it is very long, or because the previous receive was cut off well
+            // before delivering MAX_WORDS_OUT.  Long messages are uncommon.  The second reason is
+            // even less common - it would imply that the sender is not a typical Wayland client or
+            // server (libwayland-based), because those don't send partial messages unless their
+            // MAX_WORDS_OUT sized buffer fills, which would put self.front >= len.  And,
+            // libwayland-based (and us as well) clients and servers do all-or-nothing sends, so the
+            // issue is not the kernel socket buffer's size.
+            self.data.copy_within(self.front..self.back, 0);
         }
         self.back = len;
         self.front = 0;
@@ -108,11 +130,14 @@ impl<'a> InBuffer<'a> {
 const CHUNK_SIZE: usize = MAX_WORDS_OUT * 2;
 
 type Chunk = ArrayVec<u32, CHUNK_SIZE>;
+
 // Either of the following works:
-#[cfg(not(feature = "nolinkedlist"))]
+#[cfg(not(feature = "no_linked_list"))]
 type Chunks = LinkedList<Chunk>;
-#[cfg(feature = "nolinkedlist")]
+#[cfg(feature = "no_linked_list")]
 type Chunks = VecDeque<Box<Chunk>>;
+
+const ALLOWED_EXCESS_CHUNKS: usize = 4;
 
 #[derive(Debug)]
 pub(crate) struct OutBuffer<'a> {
@@ -132,7 +157,7 @@ fn initial_chunks() -> Chunks {
     new
 }
 
-const LIMIT_SENDS_TO_MAX_WORDS_OUT: bool = false;
+const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
 
 impl<'a> OutBuffer<'a> {
     pub(crate) fn new(stream: &'a IOStream) -> Self {
@@ -152,6 +177,7 @@ impl<'a> OutBuffer<'a> {
         }
     }
 
+    #[cold]
     fn start_next_chunk(&mut self) {
         let mut new_end = if self.free_chunks.is_empty() {
             initial_chunks()
@@ -266,8 +292,12 @@ impl<'a> OutBuffer<'a> {
         // cause starvation of the receiver.  This can happen whenever there are more fds than
         // can be flushed with the existing data, due to the MAX_FDS_OUT limit.
         if self.too_many_fds() {
+            // This is an exceptionally rare circumstance, requiring many messages containing
+            // fds to be sent nearly consecutively.
             self.flush(true)?;
             if self.too_many_fds() {
+                // Rarer still - the above condition but with an ineffective flush due to kernel
+                // socket buffer backup (probably the receiving peer is slow or stopped).
                 self.start_next_chunk();
                 // We should never need more than one start_next_chunk call to bring the number of
                 // fds per chunk to a safe level
@@ -362,17 +392,6 @@ impl<'a> Messenger for OutBuffer<'a> {
         self.flush(self.flush_every_send)
     }
 }
-
-#[derive(Debug, PartialEq)]
-pub enum CompactScheme {
-    Eager,
-    Lazy,
-}
-
-const COMPACT_SCHEME: CompactScheme = CompactScheme::Lazy;
-
-const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
-const ALLOWED_EXCESS_CHUNKS: usize = 8;
 
 // ExtendChunk is a restricted-interface around Chunk that only allows adding arguments from a
 // message.  Why use a wrapper struct instead of a trait?  Because this will be the arg type of a
