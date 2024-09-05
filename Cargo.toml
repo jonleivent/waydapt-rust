@@ -19,20 +19,11 @@ smallvec = "1.13.2"
 
 [build-dependencies.vergen-gitcl]
 version = "1.0.0"
-features = [
-	 "build",
-	 "cargo",
-	 "rustc"
-]
+features = [ "build", "cargo", "rustc" ]
 
 [dependencies.rustix]
 version = "0.38.34"
-features = [
-    "event",
-    "fs",
-    "net",
-    "process",
-]
+features = [ "event", "fs", "net", "process" ]
 
 [dependencies.nix]
 version = "0.29.0"
