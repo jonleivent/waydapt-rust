@@ -42,8 +42,14 @@ impl SocketListener {
             );
             xdg_runtime_dir.join(display_name)
         };
-        let lock_path = socket_path.with_extension("lock");
+        let mut lock_path = socket_path.clone();
+        lock_path.as_mut_os_string().push(".lock");
+        // Smithay's wayland-server/src/socket.rs does this:
+        //let lock_path = socket_path.with_extension("lock");
+        // but that changes the extension if it already exists, it isn't a concatenation.
+        // https://github.com/Smithay/wayland-rs/issues/759
         let lock_file = lock_file(&lock_path);
+        // Now that lock_file is locked, it is safe to clean up any existing file at socket_path:
         if socket_path.try_exists().unwrap() {
             remove_file(&socket_path).unwrap();
         }
