@@ -1,17 +1,49 @@
-use crate::{for_handlers::AddHandler, postparse::ActiveInterfaces};
-use std::collections::HashMap;
+use crate::for_handlers::InitHandlersFun;
 
-pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces);
+// For now, we require that all addons add a pair element to this:
+pub const ALL_ADDONS: &[(&str, InitHandlersFun)] = &[("safeclip", safeclip::INIT_HANDLER)];
 
-pub(crate) type IHMap = HashMap<&'static str, InitHandlersFun>;
-
-// For now, we require that all addons add an entry into the HashMap returned by get_addon_handlers.
-// At some point, maybe we will add a build script that searches for INIT_HANDLER in all addon
-// modules and populates this HashMap automatically.
-pub(crate) fn get_addon_handlers() -> IHMap {
-    HashMap::from([("safeclip", safeclip::INIT_HANDLER)])
-}
-
+/// Example addon: `SafeClip`
+///
+/// A simple addon that provides more security for Wayland clipboard operations involving sandboxed
+/// applications.
+///
+/// Wayland's clipboard is already more secure than Xorg's because any particular application can
+/// only see the clipboard contents when one of its windows is focused.  However, it is easy for the
+/// user to click on the wrong window while navigating between apps, potentially giving that
+/// window's app access to secrets in the clipboard contents.  Also, some Wayland compositors grant
+/// any newly created window focus, allowing any app to steal focus and access the clipboard.
+///
+/// This can be especially problematic when some apps are not trusted, for instance, those running
+/// within sandboxes.
+///
+/// If a sandbox is configured so that applications within it see only the socket created by waydapt
+/// with this addon (and not the compositor's socket), then the windows of those applications will
+/// be clearly marked (the title will have a prefix, assuming server-side decorations), and the
+/// clipboard those applications share will act as though it is separated from the clipboard used
+/// "outside" the sandbox.  Multiple sandboxes can either have their clipboards tied together (give
+/// them the same prefix, or use the same waydapt socket) or separated (different prefixes and
+/// different waydapt instances).
+///
+/// With a little bit of external tooling (I use a small script combined with wl-clipboard), one can
+/// transfer the clipboard contents into, out of, or between sandboxes in a safer way than relying
+/// on window focus.
+///
+/// It works by altering the "mime type" of Wayland clipboard messages to produce a filtering
+/// behavior.  Clipboard requests (client -> server messages) that pass through a waydapt+Safeclip
+/// with a prefix `|Foo|` (for example) will have `|Foo|` prepended to their mime types.  More
+/// importantly, clipboard events (server -> client) will be required to have `|Foo|` as the prefix
+/// of their mime types, else they will be dropped before any client served by that waydapt sees
+/// them.  Those events that do have the right mime type prefix will have that prefix removed by the
+/// waydapt and then get passed to clients of that waydapt.  The result is that clients served by
+/// waydapt+SafeClip using the same prefix will act as though they share a clipboard, but they won't
+/// have any access to the clipboard contents of external clients or clients of waydapt+SafeClip
+/// using a different prefix.  External clients (not using waydapt+SafeClip) can see all of the
+/// clipboards (when they get focus), but will tend to ignore any of the prefixed mime types.
+///
+/// Even if the added security of the `SafeClip` isn't that interesting to you, it does illustrate
+/// how a waydapt addon can create a useful feature by a slight alteration of some of the Wayland
+/// message traffic between its clients and the server.
 mod safeclip {
     use std::{
         borrow::Cow,
@@ -19,11 +51,9 @@ mod safeclip {
         sync::OnceLock,
     };
 
-    use crate::{
-        basics::MAX_BYTES_OUT,
-        for_handlers::{AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo},
-        postparse::ActiveInterfaces,
-        protocol::{Message, Type},
+    use crate::for_handlers::{
+        ActiveInterfaces, AddHandler, ArgData, Message, MessageHandlerResult, MessageInfo,
+        SessionInfo, Type, MAX_BYTES_OUT,
     };
 
     use super::InitHandlersFun;
@@ -105,7 +135,7 @@ mod safeclip {
         }
     }
 
-    pub(crate) const INIT_HANDLER: InitHandlersFun = init_handler;
+    pub(super) const INIT_HANDLER: InitHandlersFun = init_handler;
 
     fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
         // find the first String arg and add PREFIX to the front of it:

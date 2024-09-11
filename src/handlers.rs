@@ -6,12 +6,12 @@ use std::{
 };
 
 use crate::{
-    addons::IHMap,
     basics::Leaker,
     crate_traits::Alloc,
     for_handlers::{AddHandler, AddHandlerError, MessageHandler, SessionInitHandler},
     postparse::ActiveInterfaces,
     protocol::{Interface, Message},
+    setup::IHMap,
 };
 
 pub(crate) type SessionHandlers = VecDeque<SessionInitHandler>;

@@ -9,7 +9,7 @@ use crate::header::MessageHeader;
 use crate::map::{ObjectMap, WL_SERVER_ID_START};
 use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
-use crate::protocol::{Message, Type};
+use crate::protocol::{Message, SpecialMessage, Type};
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
@@ -136,6 +136,21 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
                     Next => continue,
                     Send => break,
                     Drop => {
+                        // Some msgs cannot be dropped.  We cannot drop a msg with a new_id arg,
+                        // because doing so might violate the invariant of contiguous object id
+                        // ranges.
+                        assert!(
+                            msg_decl.new_id_interface.get().is_none(),
+                            "Attempt to drop {msg_decl}, which has a new_id arg"
+                        );
+                        if let Some(
+                            SpecialMessage::WlRegistryBind
+                            | SpecialMessage::WlDisplaySync
+                            | SpecialMessage::WlDisplayDeleteId,
+                        ) = msg_decl.special.get()
+                        {
+                            panic!("Attempt to drop {msg_decl}, which is a required message")
+                        };
                         self.debug_drop(header, msg_decl, from_server, mod_name);
                         return Ok(());
                     }

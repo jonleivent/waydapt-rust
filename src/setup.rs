@@ -1,6 +1,6 @@
-use crate::addons::IHMap;
 use crate::basics::Leaker;
 use crate::crate_traits::Alloc;
+use crate::for_handlers::InitHandlersFun;
 use crate::handlers::{gather_handlers, SessionHandlers};
 use crate::listener::SocketListener;
 use crate::postparse::{active_interfaces, ActiveInterfaces};
@@ -11,6 +11,7 @@ use nix::sys::pthread;
 use nix::sys::signal;
 use rustix::fs::{flock, FlockOperation};
 use signal::Signal;
+use std::collections::HashMap;
 use std::env::Args;
 use std::io::{ErrorKind, Result as IoResult};
 use std::os::fd::{BorrowedFd, RawFd};
@@ -31,7 +32,12 @@ pub(crate) struct SharedOptions {
 
 static MAIN_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
 
-pub(crate) fn startup(init_handlers: &IHMap) {
+pub(crate) type IHMap = HashMap<&'static str, InitHandlersFun>;
+
+fn get_addon_handlers() -> IHMap { crate::addons::ALL_ADDONS.iter().copied().collect() }
+
+pub(crate) fn startup() {
+    let init_handlers = get_addon_handlers();
     let all_args = &mut std::env::args();
     let program = all_args.next().unwrap();
     let our_args = all_args.take_while(|a| a != "--");
@@ -61,7 +67,7 @@ pub(crate) fn startup(init_handlers: &IHMap) {
     let options = SharedOptions::new(&matches);
 
     // do all protocol and globals parsing, and handler linkups:
-    let (interfaces, handlers) = globals_and_handlers(&matches, all_args, init_handlers);
+    let (interfaces, handlers) = globals_and_handlers(&matches, all_args, &init_handlers);
 
     // Keep global track of this main thread for signalling purposes
     MAIN_THREAD.set(pthread::pthread_self()).unwrap();

@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub use crate::basics::MAX_BYTES_OUT;
 pub use crate::message::ArgData;
 pub use crate::postparse::ActiveInterfaces;
-pub use crate::protocol::{Interface, Message};
+pub use crate::protocol::{Interface, Message, Type};
 
 pub trait MessageInfo<'a> {
     fn get_num_args(&self) -> usize;
@@ -71,3 +72,5 @@ pub trait AddHandler {
     fn session_push_front(&mut self, handler: SessionInitHandler);
     fn session_push_back(&mut self, handler: SessionInitHandler);
 }
+
+pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces);

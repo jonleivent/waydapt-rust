@@ -137,6 +137,7 @@ impl<'a> Interface<'a> {
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub(crate) enum SpecialMessage {
     WlRegistryGlobal,
     WlRegistryBind,

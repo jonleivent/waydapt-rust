@@ -26,4 +26,4 @@ pub mod streams;
 pub mod terminator;
 pub mod version_info;
 
-fn main() { setup::startup(&addons::get_addon_handlers()) }
+fn main() { setup::startup() }
