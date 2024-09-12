@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="parse test protocol">
+
+  <copyright>
+    A dummy copyright to make the parser work
+
+    Including a few more lines.
+    Of text.
+  </copyright>
+
+  <!-- test interfaces -->
+
+  <interface name="test_global" version="5">
+    <request name="many_args" since="4">
+      <description summary="a request with every possible"></description>
+      <arg name="unsigned_int" type="uint" summary="an unsigned int" />
+      <arg name="signed_int" type="int" summary="a singed int" />
+      <arg name="fixed_point" type="fixed" summary="a fixed point number" />
+      <arg name="number_array" type="array" summary="an array" />
+      <arg name="some_text" type="string" summary="some text" />
+      <arg name="file_descriptor" type="fd" summary="a file descriptor" />
+      <arg name="object_id" type="object" interface="an-interface-name" />
+      <arg name="new_id" type="new_id" interface="another-interface-name" />
+    </request>
+
+    <event name="many_args_event">
+      <description summary="an event with every possible"></description>
+      <arg name="unsigned_int" type="uint" summary="an unsigned int" />
+      <arg name="signed_int" type="int" summary="a singed int" />
+      <arg name="fixed_point" type="fixed" summary="a fixed point number" />
+      <arg name="number_array" type="array" summary="an array" />
+      <arg name="some_text" type="string" summary="some text" />
+      <arg name="file_descriptor" type="fd" summary="a file descriptor" />
+      <arg name="object_id" type="object" interface="an-interface-name" />
+      <arg name="new_id" type="new_id" interface="another-interface-name" />
+    </event>
+
+    <request name="second_request" since="6">
+    </request>
+
+    <event name="second_event" since="6">
+    </event>
+  </interface>
+
+  <interface name="secondary" version="3">
+    <request name="destroy" type="destructor" since="2">
+    </request>
+  </interface>
+
+  <interface name="tertiary" version="5">
+    <request name="destroy" type="destructor" since="3">
+    </request>
+  </interface>
+
+</protocol>

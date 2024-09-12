@@ -193,3 +193,94 @@ fn parse_type(txt: &[u8]) -> Type {
         e => panic!("Unexpected type: {}", String::from_utf8_lossy(e)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(unused)]
+    use std::fs::File;
+    use std::ptr;
+
+    use crate::basics::LEAKER;
+
+    use super::*;
+
+    fn check_msg<'a>(
+        interface: &'a Interface<'a>, msg_name: &'a str, opcode: usize, request: bool, since: u32,
+    ) -> &'a Message<'a> {
+        let msg = interface.get_message(!request, opcode);
+        let ptr = ptr::from_ref(msg);
+        if request {
+            assert_eq!(ptr::from_ref(interface.get_request(opcode)), ptr);
+            assert_eq!(ptr::from_ref(interface.get_request_by_name(msg_name).unwrap()), ptr);
+            assert!(msg.is_request);
+        } else {
+            assert_eq!(ptr::from_ref(interface.get_event(opcode)), ptr);
+            assert_eq!(ptr::from_ref(interface.get_event_by_name(msg_name).unwrap()), ptr);
+            assert!(!msg.is_request);
+        }
+        assert_eq!(msg.name, msg_name);
+        assert_eq!(msg.get_name(), msg_name);
+        assert_eq!(msg.opcode as usize, opcode);
+        assert_eq!(msg.since, since);
+        msg
+    }
+
+    fn check_zero_args_msg<'a>(
+        interface: &'a Interface<'a>, msg_name: &'a str, opcode: usize, request: bool, since: u32,
+    ) {
+        let msg = check_msg(interface, msg_name, opcode, request, since);
+        assert_eq!(msg.num_fds, 0);
+        assert_eq!(msg.args.len(), 0);
+    }
+
+    fn check_many_args_msg<'a>(
+        interface: &'a Interface<'a>, msg_name: &'a str, opcode: usize, request: bool, since: u32,
+    ) {
+        let many_args_msg = check_msg(interface, msg_name, opcode, request, since);
+        assert_eq!(many_args_msg.num_fds, 1);
+        let args = &many_args_msg.args;
+        let good_args = [
+            ("unsigned_int", Type::Uint),
+            ("signed_int", Type::Int),
+            ("fixed_point", Type::Fixed),
+            ("number_array", Type::Array),
+            ("some_text", Type::String),
+            ("file_descriptor", Type::Fd),
+            ("object_id", Type::Object),
+            ("new_id", Type::NewId),
+        ];
+        assert_eq!(args.len(), good_args.len());
+        for ((good_arg_name, good_arg_typ), Arg { name, typ, .. }) in
+            good_args.iter().zip(args.iter())
+        {
+            assert_eq!(good_arg_name, name);
+            assert_eq!(good_arg_typ, typ);
+        }
+        assert_eq!(args[6].interface_name, Some("an-interface-name".into()));
+        assert_eq!(args[7].interface_name, Some("another-interface-name".into()));
+    }
+
+    #[test]
+    fn parse_test_protocol() {
+        let file = File::open("./tests/parse-test-protocol.xml").unwrap();
+        let protocol = parse(file, &LEAKER);
+        assert_eq!(protocol.name, "parse test protocol");
+        let test_global_interface = protocol.find_interface("test_global").unwrap();
+        assert_eq!(test_global_interface.name, "test_global");
+        assert_eq!(test_global_interface.parsed_version, 5);
+        check_many_args_msg(test_global_interface, "many_args", 0, true, 4);
+        check_many_args_msg(test_global_interface, "many_args_event", 0, false, 1);
+        check_zero_args_msg(test_global_interface, "second_request", 1, true, 6);
+        check_zero_args_msg(test_global_interface, "second_event", 1, false, 6);
+        //
+        let secondary_interface = protocol.find_interface("secondary").unwrap();
+        assert_eq!(secondary_interface.name, "secondary");
+        assert_eq!(secondary_interface.parsed_version, 3);
+        check_zero_args_msg(secondary_interface, "destroy", 0, true, 2);
+        //
+        let tertiary_interface = protocol.find_interface("tertiary").unwrap();
+        assert_eq!(tertiary_interface.name, "tertiary");
+        assert_eq!(tertiary_interface.parsed_version, 5);
+        check_zero_args_msg(tertiary_interface, "destroy", 0, true, 3);
+    }
+}
