@@ -2,11 +2,11 @@
 
 use crate::basics::round4;
 use crate::buffers::OutBuffer;
-use crate::crate_traits::{ClientPeer, FdInput, Messenger, ServerPeer};
+use crate::crate_traits::{FdInput, Messenger};
 #[allow(clippy::enum_glob_use)]
 use crate::for_handlers::{MessageHandlerResult::*, RInterface, SessionInfo, SessionInitInfo};
 use crate::header::MessageHeader;
-use crate::map::{ObjectMap, WL_SERVER_ID_START};
+use crate::map::{IdMap, WL_SERVER_ID_START};
 use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
 use crate::protocol::{Message, SpecialMessage, Type};
@@ -26,48 +26,6 @@ impl FdInput for VecDeque<OwnedFd> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
-#[derive(Debug)]
-pub(crate) struct IdMap {
-    pub(crate) client_id_map: ObjectMap<ClientPeer>,
-    pub(crate) server_id_map: ObjectMap<ServerPeer>,
-}
-
-impl IdMap {
-    pub(crate) fn new() -> Self {
-        Self { client_id_map: ObjectMap::new(), server_id_map: ObjectMap::new() }
-    }
-
-    pub(crate) fn try_lookup(&self, id: u32) -> Option<RInterface> {
-        if id >= WL_SERVER_ID_START {
-            self.server_id_map.lookup(id)
-        } else {
-            self.client_id_map.lookup(id)
-        }
-    }
-
-    #[inline]
-    pub(crate) fn lookup(&self, id: u32) -> RInterface {
-        let i = self.try_lookup(id);
-        i.unwrap_or_else(|| panic!("No interface for object id {id}"))
-    }
-
-    pub(crate) fn add(&mut self, id: u32, interface: RInterface) {
-        if id >= WL_SERVER_ID_START {
-            self.server_id_map.add(id, interface);
-        } else {
-            self.client_id_map.add(id, interface);
-        };
-    }
-
-    pub(crate) fn delete(&mut self, id: u32) {
-        if id >= WL_SERVER_ID_START {
-            self.server_id_map.delete(id);
-        } else {
-            self.client_id_map.delete(id);
-        };
-    }
-}
 
 #[derive(Debug)]
 pub(crate) struct Mediator<'a, S: SessionInitInfo> {

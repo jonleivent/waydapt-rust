@@ -6,43 +6,10 @@ use std::os::fd::{BorrowedFd, OwnedFd};
 
 use crate::buffers::ExtendChunk;
 use crate::header::MessageHeader;
-use crate::map::WL_SERVER_ID_START;
 
 pub(crate) trait Alloc {
     #[allow(clippy::mut_from_ref)]
     fn alloc<T>(&self, it: T) -> &mut T;
-}
-
-pub(crate) trait Peer {
-    const IS_SERVER: bool;
-
-    fn normalize_id(id: u32) -> usize;
-}
-
-#[derive(Debug)]
-pub(crate) struct ClientPeer;
-
-impl Peer for ClientPeer {
-    const IS_SERVER: bool = false;
-
-    #[inline(always)]
-    fn normalize_id(id: u32) -> usize {
-        assert!(id < WL_SERVER_ID_START, "Wrong side id");
-        id as usize
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ServerPeer;
-
-impl Peer for ServerPeer {
-    const IS_SERVER: bool = true;
-
-    #[inline(always)]
-    fn normalize_id(id: u32) -> usize {
-        assert!(id >= WL_SERVER_ID_START, "Wrong side id");
-        (id - WL_SERVER_ID_START) as usize
-    }
 }
 
 pub(crate) trait FdInput {
