@@ -1,4 +1,4 @@
-use crate::basics::{to_u8_slice_mut, uninit_array, MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
+use crate::basics::{uninit_array, MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::Messenger;
 use crate::header::{get_msg_nwords, MessageHeader};
 use crate::streams::{recv_msg, send_msg, IOStream};
@@ -412,25 +412,23 @@ impl<'a> ExtendChunk<'a> {
         self.0.push(data as u32);
     }
 
-    // Add an uninitialized slice of nwords, and then allow the caller to fill it.
-    #[inline(always)]
-    unsafe fn add_mut_slice(&mut self, nwords: usize) -> &mut [u32] {
-        let orig_len = self.0.len();
-        let new_len = orig_len + nwords;
-        unsafe {
-            self.0.set_len(new_len);
-        }
-        &mut self.0[orig_len..new_len]
-    }
-
-    #[inline(always)]
     pub(crate) fn add_array(&mut self, data: &[u8]) {
+        // Note that there is no guarantee of data having > 1 alignment, because the array/string
+        // might have been modified (and have its length changed) by an addon
         #![allow(clippy::cast_possible_truncation)]
         let nbytes = data.len();
-        self.add_u32(nbytes as u32);
-        let nwords = (nbytes + 3) / 4;
-        let words = unsafe { self.add_mut_slice(nwords) };
-        let buf = to_u8_slice_mut(words);
-        buf[..nbytes].copy_from_slice(data);
+        self.add_u32(nbytes as u32); // length field goes first
+        let rem = nbytes % 4;
+        let cut = nbytes - rem;
+        for i in (0..cut).step_by(4) {
+            self.add_u32(u32::from_ne_bytes(data[i..i + 4].try_into().unwrap()));
+        }
+        let last = match rem {
+            1 => u32::from_ne_bytes([data[cut], 0, 0, 0]),
+            2 => u32::from_ne_bytes([data[cut], data[cut + 1], 0, 0]),
+            3 => u32::from_ne_bytes([data[cut], data[cut + 1], data[cut + 2], 0]),
+            _ => return,
+        };
+        self.add_u32(last);
     }
 }
