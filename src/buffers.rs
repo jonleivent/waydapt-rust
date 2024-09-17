@@ -1,4 +1,4 @@
-use crate::basics::{uninit_array, MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
+use crate::basics::{MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::Messenger;
 use crate::header::{get_msg_nwords, MessageHeader};
 use crate::streams::{recv_msg, send_msg, IOStream};
@@ -26,7 +26,7 @@ pub(crate) struct InBuffer<'a> {
 impl<'a> InBuffer<'a> {
     pub(crate) fn new(stream: &'a IOStream) -> Self {
         Self {
-            data: uninit_array(),
+            data: [0u32; MAX_WORDS_OUT * 2],
             front: 0,
             back: 0,
             fds: VecDeque::with_capacity(MAX_FDS_OUT),

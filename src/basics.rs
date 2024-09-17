@@ -26,31 +26,6 @@ impl Alloc for Leaker {
 }
 
 #[inline(always)]
-pub(crate) const fn init_array<T: Copy, const N: usize>(init_element: T) -> [T; N] {
-    [init_element; N]
-}
-
-#[inline(always)]
-pub(crate) const fn uninit_array<T: AllBitValuesSafe, const N: usize>() -> [T; N] {
-    use std::mem::MaybeUninit;
-    // The std manual warns that this is UB:
-    //
-    // "Moreover, uninitialized memory is special in that it does not have a fixed value (“fixed”
-    // meaning “it won’t change without being written to”). Reading the same uninitialized byte
-    // multiple times can give different results. This makes it undefined behavior to have
-    // uninitialized data in a variable even if that variable has an integer type, which otherwise
-    // can hold any fixed bit pattern:"
-    //
-    // But then, how could ArrayVec::set_len be allowed?  Or how does allocation of a new ArrayVec
-    // work?
-    //
-    // It must be the case that, once we write in any way to an uninit element, it becomes stable
-    // with respect to the behavior hinted at above.  Which is all we care about.
-    let x: MaybeUninit<[T; N]> = MaybeUninit::uninit();
-    unsafe { x.assume_init() }
-}
-
-#[inline(always)]
 pub(crate) fn to_u8_slice_mut<T: AllBitValuesSafe>(s: &mut [T]) -> &mut [u8] {
     let (start, s2, end) = unsafe { s.align_to_mut::<u8>() };
     debug_assert!(start.is_empty() && end.is_empty());

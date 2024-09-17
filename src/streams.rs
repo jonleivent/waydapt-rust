@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use crate::basics::{to_u8_slice, to_u8_slice_mut, uninit_array, MAX_FDS_OUT};
+use crate::basics::{to_u8_slice, to_u8_slice_mut, MAX_FDS_OUT};
 use crate::crate_traits::AllBitValuesSafe;
 use rustix::io::{retry_on_intr, Errno, IoSlice, IoSliceMut};
 use rustix::net::{recvmsg, RecvFlags};
@@ -34,7 +34,7 @@ where
     #[cfg(not(target_os = "macos"))]
     let flags = flags | RecvFlags::CMSG_CLOEXEC;
 
-    let mut cmsg_space: [u8; CMSG_SPACE] = uninit_array();
+    let mut cmsg_space = [0u8; CMSG_SPACE]; // must be 0 init: see cmsg(3) CMSG_NXTHDR
     let mut cmsg_buffer = RecvAncillaryBuffer::new(&mut cmsg_space);
     let mut iov = [IoSliceMut::new(byte_buf)];
     let recv = || recvmsg(stream, &mut iov, &mut cmsg_buffer, flags);
@@ -76,7 +76,7 @@ where T: AllBitValuesSafe {
     } else {
         debug_assert!(fds.len() <= MAX_FDS_OUT);
         let iov = [IoSlice::new(byte_data)];
-        let mut cmsg_space: [u8; CMSG_SPACE] = uninit_array();
+        let mut cmsg_space = [0u8; CMSG_SPACE]; // must be 0 init: see cmsg(3) CMSG_NXTHDR
         let mut cmsg_buffer = SendAncillaryBuffer::new(&mut cmsg_space);
         let pushed = cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
         debug_assert!(pushed);
