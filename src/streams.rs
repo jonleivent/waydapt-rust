@@ -1,13 +1,11 @@
 #![forbid(unsafe_code)]
 use crate::basics::{to_u8_slice, to_u8_slice_mut, MAX_FDS_OUT};
-use crate::crate_traits::AllBitValuesSafe;
 use rustix::io::{retry_on_intr, Errno, IoSlice, IoSliceMut};
 use rustix::net::{recvmsg, RecvFlags};
 use rustix::net::{send, sendmsg, SendFlags};
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage};
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage};
 use std::io::Result as IoResult;
-use std::mem::size_of;
 use std::os::unix::io::{BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
@@ -23,11 +21,8 @@ fn cloexec_fd(fd: Fd) {
     }
 }
 
-pub(crate) fn recv_msg<T, F>(stream: &IOStream, buf: &mut [T], fds: &mut F) -> IoResult<usize>
-where
-    T: AllBitValuesSafe,
-    F: Extend<OwnedFd>,
-{
+pub(crate) fn recv_msg<F>(stream: &IOStream, buf: &mut [u32], fds: &mut F) -> IoResult<usize>
+where F: Extend<OwnedFd> {
     let byte_buf = to_u8_slice_mut(buf);
 
     let flags = RecvFlags::DONTWAIT;
@@ -56,15 +51,11 @@ where
 
         fds.extend(received_fds);
     }
-    let per = size_of::<T>();
-    assert_eq!(bytes % per, 0);
-    Ok(bytes / per)
+    assert_eq!(bytes % 4, 0);
+    Ok(bytes / 4)
 }
 
-pub(crate) fn send_msg<T>(
-    stream: &IOStream, data: &[T], fds: &[BorrowedFd<'_>],
-) -> IoResult<usize>
-where T: AllBitValuesSafe {
+pub(crate) fn send_msg(stream: &IOStream, data: &[u32], fds: &[BorrowedFd<'_>]) -> IoResult<usize> {
     let byte_data = to_u8_slice(data);
 
     let flags = SendFlags::DONTWAIT;
@@ -89,8 +80,8 @@ where T: AllBitValuesSafe {
             // then we would have to deal with partial chunk draining at the very least.  I think we
             // have to use all-or-nothing sends because of the MAX_FDS_OUT vs. fd starvation issue.
             assert_eq!(bytes, byte_data.len());
-            let per = size_of::<T>();
-            Ok(bytes / per)
+            assert_eq!(bytes % 4, 0);
+            Ok(bytes / 4)
         }
         Err(e) if e == Errno::WOULDBLOCK => Ok(0),
         Err(e) if e == Errno::AGAIN => Ok(0),

@@ -4,7 +4,7 @@
 
 use std::thread::panicking;
 
-use crate::crate_traits::{AllBitValuesSafe, Alloc};
+use crate::crate_traits::Alloc;
 
 pub(crate) const MAX_FDS_OUT: usize = 28;
 
@@ -26,33 +26,18 @@ impl Alloc for Leaker {
 }
 
 #[inline(always)]
-pub(crate) fn to_u8_slice_mut<T: AllBitValuesSafe>(s: &mut [T]) -> &mut [u8] {
+pub(crate) fn to_u8_slice_mut(s: &mut [u32]) -> &mut [u8] {
     let (start, s2, end) = unsafe { s.align_to_mut::<u8>() };
     debug_assert!(start.is_empty() && end.is_empty());
     s2
 }
 
 #[inline(always)]
-pub(crate) fn to_u8_slice<T: AllBitValuesSafe>(s: &[T]) -> &[u8] {
+pub(crate) fn to_u8_slice(s: &[u32]) -> &[u8] {
     let (start, s2, end) = unsafe { s.align_to::<u8>() };
     debug_assert!(start.is_empty() && end.is_empty());
     s2
 }
-
-// Maybe use the num_traits crate instead? https://docs.rs/num-traits/latest/num_traits/
-unsafe impl AllBitValuesSafe for u8 {}
-unsafe impl AllBitValuesSafe for u16 {}
-unsafe impl AllBitValuesSafe for u32 {}
-unsafe impl AllBitValuesSafe for u64 {}
-unsafe impl AllBitValuesSafe for u128 {}
-unsafe impl AllBitValuesSafe for usize {}
-
-unsafe impl AllBitValuesSafe for i8 {}
-unsafe impl AllBitValuesSafe for i16 {}
-unsafe impl AllBitValuesSafe for i32 {}
-unsafe impl AllBitValuesSafe for i64 {}
-unsafe impl AllBitValuesSafe for i128 {}
-unsafe impl AllBitValuesSafe for isize {}
 
 // maybe use crate derive_more instead of this wrapper?:
 #[derive(Copy, Clone, PartialEq, Default)]

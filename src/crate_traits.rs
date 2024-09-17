@@ -50,9 +50,3 @@ pub(crate) trait EventHandler {
         }
     }
 }
-
-// ImplAsBytes should only be implemented for types that are implemented as bytes without
-// translation, and without any possible unsafe bit values - such as the primitive numeric types
-#[allow(clippy::missing_safety_doc)]
-#[allow(unsafe_code)]
-pub(crate) unsafe trait AllBitValuesSafe {}
