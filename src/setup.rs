@@ -13,9 +13,8 @@ use rustix::fs::{flock, FlockOperation};
 use signal::Signal;
 use std::collections::HashMap;
 use std::env::Args;
-use std::io::{ErrorKind, Result as IoResult};
-use std::os::fd::{BorrowedFd, RawFd};
-use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::io::ErrorKind;
+use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -155,18 +154,21 @@ fn globals_and_handlers(
 }
 
 fn start_listening(matches: &Matches) -> SocketListener {
-    #![allow(unsafe_code)]
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
     let listener = SocketListener::new(display_name);
 
     // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
     if let Some(anti_lock_fd) = matches.opt_str("a") {
-        let raw = anti_lock_fd.parse().expect("-a fd : must be an i32");
+        let raw: u32 = anti_lock_fd.parse().expect("-a fd : must be a u32");
         #[allow(unsafe_code)]
-        let Ok(owned) = (unsafe { raw_to_owned(raw) }) else {
-            panic!("Anti-lock (-a) fd={raw} does not correspond to an open file or dir");
-        };
-        flock(owned, FlockOperation::Unlock).unwrap();
+        unsafe {
+            #[allow(clippy::cast_possible_wrap)]
+            flock(BorrowedFd::borrow_raw(raw as i32), FlockOperation::Unlock).unwrap_or_else(|e| {
+                panic!("Anti-lock (-a) fd={raw} does not correspond to an open file or dir: {e}");
+            });
+            // should we bother trying to close it?  That is more unsafe, because the fd might be
+            // manifested as an OnwedFd elsewhere that expects to stay open for its lifetime.
+        }
     };
 
     listener
@@ -215,14 +217,4 @@ pub(crate) fn terminate_main_thread() {
     );
 
     pthread::pthread_kill(*main_thread, Signal::SIGUSR1).unwrap();
-}
-
-// Make the conversion from raw fd to OnwedFd safer by checking that the fd is really present and
-// open.  It still isn't a safe operation because it could be used to duplicate an OwnedFd
-unsafe fn raw_to_owned(rawfd: RawFd) -> IoResult<OwnedFd> {
-    #![allow(unsafe_code)]
-    unsafe {
-        rustix::fs::fstat(BorrowedFd::borrow_raw(rawfd))?;
-        Ok(OwnedFd::from_raw_fd(rawfd))
-    }
 }

@@ -27,6 +27,9 @@ impl Alloc for Leaker {
 
 #[inline(always)]
 pub(crate) fn to_u8_slice_mut(s: &mut [u32]) -> &mut [u8] {
+    // Safety: there's no way for a 4-byte aligned &mut [u32] to have any left-over start or end
+    // parts when converting to a 1-byte aligned &mut [u8], and it is safe to view u32's as
+    // native-endian sequences of u8's.
     let (start, s2, end) = unsafe { s.align_to_mut::<u8>() };
     debug_assert!(start.is_empty() && end.is_empty());
     s2
@@ -34,6 +37,9 @@ pub(crate) fn to_u8_slice_mut(s: &mut [u32]) -> &mut [u8] {
 
 #[inline(always)]
 pub(crate) fn to_u8_slice(s: &[u32]) -> &[u8] {
+    // Safety: there's no way for a 4-byte aligned &[u32] to have any left-over start or end parts
+    // when converting to a 1-byte aligned &[u8], and it is safe to view u32's as native-endian
+    // sequences of u8's.
     let (start, s2, end) = unsafe { s.align_to::<u8>() };
     debug_assert!(start.is_empty() && end.is_empty());
     s2
