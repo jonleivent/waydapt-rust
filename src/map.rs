@@ -38,7 +38,9 @@ impl IdMap {
     }
 
     pub(crate) fn new() -> Self {
-        Self { client_id_map: ObjectMap::new(), server_id_map: ObjectMap::new() }
+        let mut s = Self { client_id_map: ObjectMap::new(), server_id_map: ObjectMap::new() };
+        s.client_id_map.push(ObjectEntry::NeverUsed); // id==0 is never used
+        s
     }
 
     pub(crate) fn try_lookup(&self, id: u32) -> Option<RInterface> {
