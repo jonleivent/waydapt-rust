@@ -461,6 +461,8 @@ mod tests {
         msg
     }
 
+    // a quick-and-dirty fake message with deterministic but distinct contents that is fit for
+    // sending via send_fake_msg_for_send, which exercises send instead of send_raw.
     fn fake_msg_for_send(object_id: u32, nwords: u16) -> Vec<u32> {
         assert!(nwords >= 2);
         let mut msg = Vec::with_capacity(nwords as usize);
@@ -476,6 +478,7 @@ mod tests {
         msg
     }
 
+    // for sending fake_msg_for_send
     fn send_fake_msg_for_send(
         out: &mut OutBuffer, fds: impl IntoIterator<Item = OwnedFd>, msg: &[u32],
     ) -> IoResult<usize> {
@@ -495,19 +498,22 @@ mod tests {
         // is a nbytes measure - this has to be accurate for try_pop to work.
         let msg1 = fake_msg(1, 512);
         let msg2 = fake_msg(2, 512);
+
         assert_eq!(send_msg(&s2, &msg1, &[]).unwrap(), msg1.len());
         assert_eq!(send_msg(&s2, &msg2, &[]).unwrap(), msg2.len());
         assert_eq!(inbuf.receive().unwrap(), msg1.len() + msg2.len());
         // the inbuf contains only those two:
         assert_eq!(inbuf.front, 0);
         assert_eq!(inbuf.back, msg1.len() + msg2.len());
+
         // Pop the first msg and compare contents with the original:
         let (inmsg1, _) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg1, msg1);
-        // This will do a fast compact (if FAST_COMPACT is true)
+        // This will do a compact (via fast memcpy path if FAST_COMPACT is true)
         inbuf.compact(); // should have no impact on contents, only on position
         assert_eq!(inbuf.front, 0);
         assert_eq!(inbuf.back, msg2.len());
+
         // Pop the second msg and compare contents with the original:
         let (inmsg2, _) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg2, msg2);
@@ -520,10 +526,7 @@ mod tests {
     fn inbuf_test2() {
         let (s1, s2) = UnixStream::pair().unwrap();
         let mut inbuf = InBuffer::new(&s1);
-        // send 2 long msgs, but <= MAX_WORDS_OUT.  InBuffer doesn't care about any part of the msg
-        // other than the header length field, which it sees by calling get_msg_nwords on the input.
-        // The length field is the high 16 bits of the second (1th) word (u32) of the msg - and it
-        // is a nbytes measure - this has to be accurate for try_pop to work.
+        // send 3 long msgs, with total length > MAX_WORDS_OUT.
         let msg1 = fake_msg(1, 256);
         let msg2 = fake_msg(2, 1024);
         let msg3 = fake_msg(3, 512);
@@ -572,6 +575,7 @@ mod tests {
         let (s1, s2) = UnixStream::pair().unwrap();
         s1.set_nonblocking(true).unwrap();
         s2.set_nonblocking(true).unwrap();
+        // Just a trivial single msg to sanity test end-to-end buffering
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
         let msg = fake_msg(1, 1024);
@@ -590,6 +594,7 @@ mod tests {
         s2.set_nonblocking(true).unwrap();
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
+        // Same as inout_test1, but use send instead of send_raw
         let msg = fake_msg_for_send(1, 1024);
 
         assert_eq!(send_fake_msg_for_send(&mut outbuf, [], &msg).unwrap(), 0); // not flushed
@@ -606,8 +611,10 @@ mod tests {
         s2.set_nonblocking(true).unwrap();
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
+        // Exercise msg splitting by using msgs that don't add up to a multiple of 1024
 
-        outbuf.wait_for_output_event = true; // prevent flushes
+        // Prevent flushes so we can examine the full impact of the splitting, if any occurred
+        outbuf.wait_for_output_event = true;
 
         // test chunk extending for both the fits in remaining capacty and doesn't fit cases:
         #[allow(clippy::cast_possible_truncation)]
@@ -639,11 +646,72 @@ mod tests {
         assert_eq!(inbuf.receive().unwrap(), 1024);
         let (inmsg, _) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg, msgs[0]);
+
         let (inmsg, _) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg, msgs[1]);
+        assert!(inbuf.try_pop().is_none()); // no more complete msgs until we receive more data
+
         assert_eq!(inbuf.receive().unwrap(), 128);
         let (inmsg, _) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg, msgs[2]);
+        assert!(inbuf.try_pop().is_none());
+    }
+
+    #[test]
+    fn inout_free_chunks_test1() {
+        let (s1, s2) = UnixStream::pair().unwrap();
+        s1.set_nonblocking(true).unwrap();
+        s2.set_nonblocking(true).unwrap();
+        let mut inbuf = InBuffer::new(&s1);
+        let mut outbuf = OutBuffer::new(&s2);
+        // Test of the free_chunks list, its ALLOWED_EXCESS_CHUNKS max length, and re-use of chunks
+
+        #[allow(clippy::cast_possible_truncation)]
+        let msgs: [Vec<u32>; ALLOWED_EXCESS_CHUNKS + 2] =
+            array::from_fn(|i| fake_msg(i as u32, 1024));
+
+        outbuf.wait_for_output_event = true; // prevent flushes
+        for m in &msgs {
+            assert_eq!(outbuf.send_raw([], m).unwrap(), 0); // not flushed
+        }
+        assert_eq!(outbuf.chunks.len(), ALLOWED_EXCESS_CHUNKS + 2);
+        assert_eq!(outbuf.free_chunks.len(), 0);
+
+        outbuf.wait_for_output_event = false; // allow flushes
+
+        // The amount flushed before any is received could be less on systems with very restrictive
+        // socket buffers, but on most linuxes, the standard capacity is 52 * 4K, so not a problem
+        // if ALLOWED_EXCESS_CHUNKS isn't too big.
+        assert_eq!(outbuf.flush(true).unwrap(), (ALLOWED_EXCESS_CHUNKS + 2) * 1024);
+        assert_eq!(outbuf.chunks.len(), 1);
+        assert_eq!(outbuf.free_chunks.len(), ALLOWED_EXCESS_CHUNKS);
+
+        for m in &msgs {
+            assert_eq!(inbuf.receive().unwrap(), 1024);
+            let (inmsg, _) = inbuf.try_pop().unwrap();
+            assert_eq!(inmsg, m);
+        }
+
+        // repeat so that we reuse the free list:
+
+        outbuf.wait_for_output_event = true; // prevent flushes
+        for m in &msgs {
+            assert_eq!(outbuf.send_raw([], m).unwrap(), 0); // not flushed
+        }
+        assert_eq!(outbuf.chunks.len(), ALLOWED_EXCESS_CHUNKS + 2);
+        assert_eq!(outbuf.free_chunks.len(), 0);
+
+        outbuf.wait_for_output_event = false; // allow flushes
+
+        assert_eq!(outbuf.flush(true).unwrap(), (ALLOWED_EXCESS_CHUNKS + 2) * 1024);
+        assert_eq!(outbuf.chunks.len(), 1);
+        assert_eq!(outbuf.free_chunks.len(), ALLOWED_EXCESS_CHUNKS);
+
+        for m in &msgs {
+            assert_eq!(inbuf.receive().unwrap(), 1024);
+            let (inmsg, _) = inbuf.try_pop().unwrap();
+            assert_eq!(inmsg, m);
+        }
     }
 
     #[test]
@@ -653,6 +721,7 @@ mod tests {
         s2.set_nonblocking(true).unwrap();
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
+        // Like inout_test2, only with send instead of send_raw
 
         outbuf.wait_for_output_event = true; // prevent flushes
 
@@ -691,6 +760,52 @@ mod tests {
         assert_eq!(inmsg, msgs[2]);
     }
 
+    #[test]
+    fn inout_send_test3() {
+        let (s1, s2) = UnixStream::pair().unwrap();
+        s1.set_nonblocking(true).unwrap();
+        s2.set_nonblocking(true).unwrap();
+        let mut inbuf = InBuffer::new(&s1);
+        let mut outbuf = OutBuffer::new(&s2);
+        // Like inout_send_test2, but with an additional msg to exercise splitting even in the non
+        // LIMIT_SENDS_TO_MAX_WORDS_OUT case.
+
+        outbuf.wait_for_output_event = true; // prevent flushes
+
+        // test chunk extending for both the fits in remaining capacty and doesn't fit cases:
+        #[allow(clippy::cast_possible_truncation)]
+        let msgs: [Vec<u32>; 4] = std::array::from_fn(|i| fake_msg_for_send(i as u32, 384));
+        for m in &msgs {
+            assert_eq!(send_fake_msg_for_send(&mut outbuf, [], m).unwrap(), 0); // not flushed
+        }
+        assert_eq!(outbuf.flush(true).unwrap(), 0); // still not flushed
+        if LIMIT_SENDS_TO_MAX_WORDS_OUT {
+            assert_eq!(outbuf.chunks.len(), 2);
+            assert_eq!(outbuf.chunks.front().unwrap().len(), 1024);
+            assert_eq!(outbuf.chunks.back().unwrap().len(), 512);
+        } else {
+            assert_eq!(outbuf.chunks.len(), 2);
+            assert_eq!(outbuf.chunks.front().unwrap().len(), 1152);
+            assert_eq!(outbuf.chunks.back().unwrap().len(), 384);
+        }
+
+        outbuf.wait_for_output_event = false; // allow flushes
+        assert_eq!(outbuf.flush(true).unwrap(), 1536);
+        assert_eq!(outbuf.chunks.len(), 1);
+        assert_eq!(outbuf.free_chunks.len(), 1);
+
+        assert_eq!(inbuf.receive().unwrap(), 1024);
+        let (inmsg, _) = inbuf.try_pop().unwrap();
+        assert_eq!(inmsg, msgs[0]);
+        let (inmsg, _) = inbuf.try_pop().unwrap();
+        assert_eq!(inmsg, msgs[1]);
+        assert_eq!(inbuf.receive().unwrap(), 512);
+        let (inmsg, _) = inbuf.try_pop().unwrap();
+        assert_eq!(inmsg, msgs[2]);
+        let (inmsg, _) = inbuf.try_pop().unwrap();
+        assert_eq!(inmsg, msgs[3]);
+    }
+
     // create a unique fd by creating a temp file and writing uid to it
     fn fd_for_test(uid: u32) -> OwnedFd {
         let mut f = tempfile::tempfile().unwrap();
@@ -715,6 +830,7 @@ mod tests {
         s2.set_nonblocking(true).unwrap();
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
+        // Sanity test for fds - send 2 fds with a tiny msg.
 
         let msg = fake_msg(1, 2);
         let fd1 = fd_for_test(42);
@@ -741,11 +857,12 @@ mod tests {
         s2.set_nonblocking(true).unwrap();
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
+        // Test the too_many_fds logic.
 
         outbuf.wait_for_output_event = true; // prevent auto flush
 
-        // MAX_FDS_OUT is 28, but MAX_ARGS is 20.  We will use 2 msgs with 20 fds each to force a
-        // second chunk.
+        // MAX_FDS_OUT is 28, but MAX_ARGS is 20 (both are eternally fixed by Wayland spec).  We
+        // will use 2 msgs with 20 fds each to force a second chunk.
 
         let msg1 = fake_msg(1, 2);
         let fd1array: [OwnedFd; 20] = array::from_fn(|i| fd_for_test(i as u32));
@@ -766,19 +883,22 @@ mod tests {
 
         // We will only get the first msg, even though both were flushed together.  Why?  It's not
         // something we did.  I suspect that if we arranged to receive all 40 fds, then we would
-        // have received both msgs.  But the recvmsg call must be smart enough to know that having
-        // fds but no data is not a good condition for it to be in, so it prevents it.  But would it
-        // have been prevented if we didn't have the too_many_fds logic?  It's a slightly different
-        // problem - the too_many_fds is there to prevent fds from not being sendable because we
-        // have a send max of MAX_FDS_OUT.  Having fds we can't send can always starve the receiver
-        // regardless of the measures that recvmsg takes.  What the kernel must be doing is
-        // associating a msg length with a number of fds - and if the receiver doesn't have room for
-        // all of the fds, it won't receive the associated msg in that recvmsg call.
+        // have received both msgs.  But the recvmsg call (the kernel socket internal logic) must be
+        // smart enough to know that having fds but no data is not a good condition for it to be in,
+        // so it prevents it.  What the kernel must be doing is associating a msg length with a
+        // number of fds - and if the receiver doesn't have room for all of the fds, it won't
+        // receive the associated msg in that recvmsg call.  Note that this is a slightly different
+        // problem from the too_many_fds case we have to handle, which prevents fds from not being
+        // sendable because we have a send max of MAX_FDS_OUT.  Having fds we can't send can always
+        // starve the receiver regardless of the measures that recvmsg takes.
         assert_eq!(inbuf.receive().unwrap(), 2);
 
         let (inmsg1, fdqueue1) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg1, msg1);
-        // Note that we should get 28 fds with this
+        // We should get 28 fds with this, even though our first send had 20 fds.  The kernel will
+        // allow recvmsg to accept more but not less fds than were sent with a chunk.  Which is the
+        // right thing to do, because less could starve the receiver, as there is no way to recvmsg
+        // only fds when there is no accompanying data.
         assert_eq!(fdqueue1.len(), 28);
         for i in 0..28 {
             let fd = fdqueue1.pop_front().unwrap();
@@ -789,7 +909,7 @@ mod tests {
         assert_eq!(inbuf.receive().unwrap(), 2);
         let (inmsg2, fdqueue2) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg2, msg2);
-        // and 12 fds with this
+        // Now we get the remaining 12 fds
         assert_eq!(fdqueue2.len(), 12);
         for i in 28..40 {
             let fd = fdqueue2.pop_front().unwrap();
@@ -855,5 +975,35 @@ mod tests {
         let (inmsg, fdqueue) = inbuf.try_pop().unwrap();
         assert_eq!(inmsg, msgs[2]);
         assert!(fdqueue.is_empty());
+    }
+
+    #[test]
+    fn test_extend_chunk() {
+        // exercise ExtendChunk fully
+        let mut chunk = Chunk::new();
+        let mut extend = ExtendChunk(&mut chunk);
+
+        extend.add_u32(42);
+        extend.add_i32(13);
+        extend.add_array(&[]);
+        extend.add_array(&[0x01]);
+        extend.add_array(&[0x23, 0x45]);
+        extend.add_array(&[0x67, 0x89, 0xab]);
+        extend.add_array(&[0xcd, 0xef, 0xfe, 0xdc]);
+        let should_be = [
+            42u32.to_ne_bytes(),
+            13i32.to_ne_bytes(),
+            0u32.to_ne_bytes(),
+            1u32.to_ne_bytes(),
+            [0x01, 0, 0, 0],
+            2u32.to_ne_bytes(),
+            [0x23, 0x45, 0, 0],
+            3u32.to_ne_bytes(),
+            [0x67, 0x89, 0xab, 0],
+            4u32.to_ne_bytes(),
+            [0xcd, 0xef, 0xfe, 0xdc],
+        ]
+        .concat();
+        assert_eq!(to_u8_slice(&chunk), &should_be[..]);
     }
 }
