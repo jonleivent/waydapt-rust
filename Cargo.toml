@@ -9,7 +9,7 @@ no_linked_list = []
 always_compact = []
 fast_compact = []
 limit_sends = []
-default = [ "limit_sends", "always_compact" ]
+default = [ "always_compact", "fast_compact", "limit_sends" ]
 
 [dependencies]
 arrayvec = "0.7.4"
@@ -42,4 +42,7 @@ opt-level = "z"
 strip = true
 debug-assertions = false
 lto = "fat"
+
+[dev-dependencies]
+tempfile = "3.12.0"
 
