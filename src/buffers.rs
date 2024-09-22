@@ -439,13 +439,19 @@ impl<'a> ExtendChunk<'a> {
 }
 
 #[cfg(test)]
+pub(crate) mod privates {
+    pub(crate) type Chunk = super::Chunk;
+    pub(crate) use super::ExtendChunk;
+
+    pub(crate) fn mk_extend_chunk(chunk: &mut Chunk) -> ExtendChunk<'_> { ExtendChunk(chunk) }
+}
+
+#[cfg(test)]
 mod tests {
     use std::array;
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom, Write};
     use std::os::unix::net::UnixStream;
 
-    use crate::basics::to_u8_slice;
+    use crate::basics::{test_util::*, to_u8_slice};
 
     use super::*;
 
@@ -806,23 +812,6 @@ mod tests {
         assert_eq!(inmsg, msgs[3]);
     }
 
-    // create a unique fd by creating a temp file and writing uid to it
-    fn fd_for_test(uid: u32) -> OwnedFd {
-        let mut f = tempfile::tempfile().unwrap();
-        f.write_all(&uid.to_ne_bytes()).unwrap();
-        f.into()
-    }
-
-    // check fd from fd_for_test
-    fn check_test_fd(fd: impl AsFd, uid: u32) -> bool {
-        let ofd = fd.as_fd().try_clone_to_owned().unwrap();
-        let mut f = File::from(ofd);
-        let mut v = [0u8; 4];
-        f.seek(SeekFrom::Start(0)).unwrap();
-        f.read_exact(&mut v[..]).unwrap();
-        uid == u32::from_ne_bytes(v)
-    }
-
     #[test]
     fn fd_test1() {
         let (s1, s2) = UnixStream::pair().unwrap();
@@ -990,6 +979,8 @@ mod tests {
         extend.add_array(&[0x23, 0x45]);
         extend.add_array(&[0x67, 0x89, 0xab]);
         extend.add_array(&[0xcd, 0xef, 0xfe, 0xdc]);
+        extend.add_array(&[0xba, 0x98, 0x76, 0x54, 0x32, 0x10]);
+        extend.add_array(b"abcdefghijklmnopqrstuvwxyz");
         let should_be = [
             42u32.to_ne_bytes(),
             13i32.to_ne_bytes(),
@@ -1002,6 +993,17 @@ mod tests {
             [0x67, 0x89, 0xab, 0],
             4u32.to_ne_bytes(),
             [0xcd, 0xef, 0xfe, 0xdc],
+            6u32.to_ne_bytes(),
+            [0xba, 0x98, 0x76, 0x54],
+            [0x32, 0x10, 0, 0],
+            26u32.to_ne_bytes(),
+            *b"abcd",
+            *b"efgh",
+            *b"ijkl",
+            *b"mnop",
+            *b"qrst",
+            *b"uvwx",
+            *b"yz\0\0",
         ]
         .concat();
         assert_eq!(to_u8_slice(&chunk), &should_be[..]);

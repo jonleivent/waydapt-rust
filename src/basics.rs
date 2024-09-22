@@ -76,3 +76,27 @@ impl<F: FnOnce() + Copy> Drop for UnwindDo<F> {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::fd::{AsFd, OwnedFd};
+
+    // create a unique fd by creating a temp file and writing uid to it
+    pub(crate) fn fd_for_test(uid: u32) -> OwnedFd {
+        let mut f = tempfile::tempfile().unwrap();
+        f.write_all(&uid.to_ne_bytes()).unwrap();
+        f.into()
+    }
+
+    // check fd from fd_for_test
+    pub(crate) fn check_test_fd(fd: impl AsFd, uid: u32) -> bool {
+        let ofd = fd.as_fd().try_clone_to_owned().unwrap();
+        let mut f = File::from(ofd);
+        let mut v = [0u8; 4];
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_exact(&mut v[..]).unwrap();
+        uid == u32::from_ne_bytes(v)
+    }
+}
