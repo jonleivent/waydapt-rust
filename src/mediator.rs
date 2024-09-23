@@ -147,7 +147,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
 }
 
 impl<'a> Message<'a> {
-    fn find_new_id(&self, data: &[u32]) -> u32 {
+    pub(crate) fn find_new_id(&self, data: &[u32]) -> u32 {
         // The new_id arg is most often the first arg, so this is usually fast
         let mut i = 2; // bypass 2 header words
         for arg in &self.args {

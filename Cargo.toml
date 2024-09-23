@@ -9,7 +9,7 @@ no_linked_list = []
 always_compact = []
 fast_compact = []
 limit_sends = []
-default = [ "always_compact", "fast_compact", "limit_sends" ]
+default = [ "always_compact", "fast_compact" ]
 
 [dependencies]
 arrayvec = "0.7.4"
@@ -46,3 +46,5 @@ lto = "fat"
 [dev-dependencies]
 tempfile = "3.12.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }

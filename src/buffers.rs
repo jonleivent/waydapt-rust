@@ -665,15 +665,15 @@ mod tests {
 
     #[test]
     fn inout_free_chunks_test1() {
+        const MSGS_PER_CHUNK: usize = if LIMIT_SENDS_TO_MAX_WORDS_OUT { 1 } else { 2 };
         let (s1, s2) = UnixStream::pair().unwrap();
         s1.set_nonblocking(true).unwrap();
         s2.set_nonblocking(true).unwrap();
         let mut inbuf = InBuffer::new(&s1);
         let mut outbuf = OutBuffer::new(&s2);
         // Test of the free_chunks list, its ALLOWED_EXCESS_CHUNKS max length, and re-use of chunks
-
         #[allow(clippy::cast_possible_truncation)]
-        let msgs: [Vec<u32>; ALLOWED_EXCESS_CHUNKS + 2] =
+        let msgs: [Vec<u32>; (ALLOWED_EXCESS_CHUNKS + 2) * MSGS_PER_CHUNK] =
             array::from_fn(|i| fake_msg(i as u32, 1024));
 
         outbuf.wait_for_output_event = true; // prevent flushes
@@ -688,7 +688,10 @@ mod tests {
         // The amount flushed before any is received could be less on systems with very restrictive
         // socket buffers, but on most linuxes, the standard capacity is 52 * 4K, so not a problem
         // if ALLOWED_EXCESS_CHUNKS isn't too big.
-        assert_eq!(outbuf.flush(true).unwrap(), (ALLOWED_EXCESS_CHUNKS + 2) * 1024);
+        assert_eq!(
+            outbuf.flush(true).unwrap(),
+            (ALLOWED_EXCESS_CHUNKS + 2) * 1024 * MSGS_PER_CHUNK
+        );
         assert_eq!(outbuf.chunks.len(), 1);
         assert_eq!(outbuf.free_chunks.len(), ALLOWED_EXCESS_CHUNKS);
 
@@ -709,7 +712,10 @@ mod tests {
 
         outbuf.wait_for_output_event = false; // allow flushes
 
-        assert_eq!(outbuf.flush(true).unwrap(), (ALLOWED_EXCESS_CHUNKS + 2) * 1024);
+        assert_eq!(
+            outbuf.flush(true).unwrap(),
+            (ALLOWED_EXCESS_CHUNKS + 2) * 1024 * MSGS_PER_CHUNK
+        );
         assert_eq!(outbuf.chunks.len(), 1);
         assert_eq!(outbuf.free_chunks.len(), ALLOWED_EXCESS_CHUNKS);
 
