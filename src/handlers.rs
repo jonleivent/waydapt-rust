@@ -86,14 +86,10 @@ impl AllHandlers {
         // Set the Message.handlers fields
         for (_, (_interface, mut interface_handlers)) in self.message_handlers.drain() {
             for (_, (request, request_handlers)) in interface_handlers.request_handlers.drain() {
-                if request.handlers.set(request_handlers).is_err() {
-                    unreachable!("should only be set once");
-                }
+                request.handlers.set(request_handlers).expect("should only be set once");
             }
             for (_, (event, event_handlers)) in interface_handlers.event_handlers.drain() {
-                if event.handlers.set(event_handlers).is_err() {
-                    unreachable!("should only be set once");
-                }
+                event.handlers.set(event_handlers).expect("should only be set once");
             }
         }
     }
