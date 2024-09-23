@@ -110,6 +110,7 @@ impl EventHandler for SocketEventHandler {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn handle_output(&mut self, _fd_index: usize) -> IoResult<()> {
         unreachable!("We didn't ask for no output!")
     }

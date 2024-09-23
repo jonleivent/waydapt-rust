@@ -28,6 +28,7 @@ impl<'a> Protocol<'a> {
 }
 
 impl<'a> fmt::Display for Protocol<'a> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "protocol {}", self.name)
     }

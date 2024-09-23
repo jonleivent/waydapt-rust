@@ -263,9 +263,6 @@ impl<'a> Interface<'a> {
             if parent.same_as(prev_parent) {
                 return;
             }
-            if self.name == "wl_callback" && self.owning_protocol().name == "wayland" {
-                return;
-            }
             panic!("{self} has at least two parents {} and {}", prev_parent.name, parent.name)
         }
     }
@@ -351,6 +348,7 @@ pub(crate) struct Foster<'a, T: ?Sized>(pub(crate) &'a T);
 
 use std::fmt;
 impl<'a, T: fmt::Display> fmt::Display for Foster<'a, [T]> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         let mut first = true;
         write!(f, "[")?;

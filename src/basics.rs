@@ -51,6 +51,7 @@ pub(crate) fn to_u8_slice(s: &[u32]) -> &[u8] {
 pub struct NoDebug<T: ?Sized>(pub T);
 
 impl<T: ?Sized> std::fmt::Debug for NoDebug<T> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         write!(f, "<...>")
     }
@@ -63,6 +64,7 @@ impl<T: ?Sized> std::ops::Deref for NoDebug<T> {
 }
 
 impl<T: ?Sized> std::ops::DerefMut for NoDebug<T> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }

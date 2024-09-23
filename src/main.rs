@@ -2,6 +2,7 @@
 #![deny(unsafe_code)]
 #![forbid(clippy::large_types_passed_by_value)]
 #![forbid(clippy::large_stack_frames)]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod addons;
 pub mod basics;
