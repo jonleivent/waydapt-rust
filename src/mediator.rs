@@ -120,7 +120,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
             // Fast track, no demarshalling, although maybe just a little parsing to find the new_id
             // value if it is present:
             if let Some(interface) = msg_decl.new_id_interface.get() {
-                let id = Self::find_new_id(msg_decl, in_msg);
+                let id = msg_decl.find_new_id(in_msg);
                 if id < WL_SERVER_ID_START || !msg_decl.is_wl_display_sync() {
                     // this is NOT the delete-id handshake reply in wayland-idfix - if it were,
                     // there would be no id to add - see DemarshalledMessage::add_new_id for similar
@@ -144,11 +144,13 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
 
         Ok(())
     }
+}
 
-    fn find_new_id(msg_decl: &Message, data: &[u32]) -> u32 {
+impl<'a> Message<'a> {
+    fn find_new_id(&self, data: &[u32]) -> u32 {
         // The new_id arg is most often the first arg, so this is usually fast
         let mut i = 2; // bypass 2 header words
-        for arg in msg_decl.get_args() {
+        for arg in &self.args {
             let inc = match arg.typ {
                 Type::NewId => return data[i],
                 Type::Int | Type::Uint | Type::Fixed | Type::Object => 1,
@@ -157,7 +159,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
             };
             i += inc;
         }
-        panic!("No new_id arg found when one was expected for {msg_decl:?}")
+        panic!("No new_id arg found when one was expected for {self:?}")
     }
 }
 
