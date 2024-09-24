@@ -66,7 +66,11 @@ fn parse_protocol<R: BufRead>(mut reader: Reader<R>, alloc: &impl Alloc) -> &Pro
             Ok(Event::Start(bytes)) => {
                 if let b"interface" = bytes.name().into_inner() {
                     let interface = parse_interface(&mut reader, bytes.attributes(), alloc);
-                    protocol.interfaces.insert(&interface.name, interface);
+                    assert!(
+                        protocol.interfaces.insert(&interface.name, interface).is_none(),
+                        "Multiple interfaces named {}",
+                        interface.name
+                    );
                 }
             }
             Ok(Event::End(bytes)) => {
