@@ -9,7 +9,7 @@ no_linked_list = []
 always_compact = []
 fast_compact = []
 limit_sends = []
-default = [ "always_compact", "fast_compact" ]
+default = [ "always_compact", "fast_compact", "limit_sends" ]
 
 [dependencies]
 arrayvec = "0.7.4"

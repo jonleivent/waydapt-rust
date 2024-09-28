@@ -212,12 +212,12 @@ fn get_globals_limits(
     }
 }
 
-// We changed this so that not all interfaces in an active protocol are active - only those that
-// have an active global ancestor.  The reasoning is that without an active global ancestor, there's
-// no way to create an object with that interface from within the current protocol.  But what about
-// external messages?  Should we include them in the determination of which interfaces are active?
-// But in that case, what's the limited version to use?  There won't be one, as version numbers
-// don't propagate across external links.
+// Only interfaces that have an active global ancestor can be active.  The reasoning is that without
+// an active global ancestor, there's no way to create an object with that interface from within the
+// current protocol.  But what about external messages?  Should we include them in the determination
+// of which interfaces are active?  But in that case, what's the limited version to use?  There
+// won't be one, as version numbers don't propagate across external links.  Hence an interface
+// cannot be considered active solely due to its external (to its owning protocol) usage.
 fn propagate_limits_find_actives<'a>(protocols: &AllProtocols<'a>) -> ActiveInterfaceMap<'a> {
     let mut active_interfaces: ActiveInterfaceMap = HashMap::new();
     let is = protocols.iter().filter(|p| p.is_active()).flat_map(|p| p.interfaces.values());
@@ -225,8 +225,8 @@ fn propagate_limits_find_actives<'a>(protocols: &AllProtocols<'a>) -> ActiveInte
         let global_ancestor = interface.global_ancestor();
         let Some(global_limit) = global_ancestor.limited_version.get() else { continue };
         // interface is active because it has an active global ancestor
-        let conflict = |i2: &mut _| panic!("Active interface conflict: {i2} vs. {interface}");
-        active_interfaces.entry(name).and_modify(conflict).or_insert(interface);
+        let conflict = |i2| panic!("Active interface conflict: {i2} vs. {interface}");
+        active_interfaces.insert(name, interface).map(conflict);
         let limit = min(*parsed_version, *global_limit);
         for message in interface.all_messages().filter(|m| m.since <= limit) {
             message.active.set(()).expect("message.active should only be set here");

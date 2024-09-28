@@ -65,12 +65,11 @@ pub(crate) fn send_msg(stream: &IOStream, data: &[u32], fds: &[BorrowedFd<'_>]) 
     let result = if fds.is_empty() {
         retry_on_intr(|| send(stream, byte_data, flags))
     } else {
-        debug_assert!(fds.len() <= MAX_FDS_OUT);
+        assert!(fds.len() <= MAX_FDS_OUT);
         let iov = [IoSlice::new(byte_data)];
         let mut cmsg_space = [0u8; CMSG_SPACE]; // must be 0 init: see cmsg(3) CMSG_NXTHDR
         let mut cmsg_buffer = SendAncillaryBuffer::new(&mut cmsg_space);
-        let pushed = cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds));
-        debug_assert!(pushed);
+        assert!(cmsg_buffer.push(SendAncillaryMessage::ScmRights(fds)));
         retry_on_intr(|| sendmsg(stream, &iov, &mut cmsg_buffer, flags))
     };
     match result {

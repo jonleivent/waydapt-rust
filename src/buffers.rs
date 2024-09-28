@@ -167,9 +167,10 @@ impl<'a> OutBuffer<'a> {
             chunks: initial_chunks(),
             // free_chunks can start life empty:
             free_chunks: Default::default(),
-            // fds will never grow larger than MAX_FDS_OUT + MAX_ARGS because MAX_ARGS is the most
+            // fds should not grow larger than MAX_FDS_OUT + MAX_ARGS because MAX_ARGS is the most
             // any one message can push on it, and whenever it gets larger than MAX_FDS_OUT, it will
-            // force a flush:
+            // force a flush.  Unless the kernel socket buffer is full - in which case there is no
+            // limit on growth.
             fds: VecDeque::with_capacity(MAX_FDS_OUT + MAX_ARGS),
             flush_every_send: false,
             wait_for_output_event: false,
@@ -316,6 +317,7 @@ impl<'a> Messenger for OutBuffer<'a> {
         &mut self, fds: impl IntoIterator<Item = OwnedFd>,
         msgfun: impl FnOnce(ExtendChunk) -> MessageHeader,
     ) -> IoResult<usize> {
+        #![allow(clippy::cast_possible_truncation)]
         // for each msg, push fds first, then push the msg.  This is because we want any fds to be
         // associated with the earliest possible data chunk to help prevent fd starvation of the
         // receiver.
@@ -344,12 +346,8 @@ impl<'a> Messenger for OutBuffer<'a> {
         let len = new_len - orig_len;
         assert!((2..=MAX_WORDS_OUT).contains(&len));
         // fix the header.size field to the now known length and write the header:
-        {
-            #![allow(clippy::cast_possible_truncation)]
-            // we know this won't truncate because MAX_WORDS_OUT is <= the max u16:
-            debug_assert!(u16::try_from(MAX_WORDS_OUT).is_ok());
-            header.size = 4 * (len as u16);
-        };
+        // we know this won't truncate because MAX_WORDS_OUT is < the max u16:
+        header.size = 4 * (len as u16);
         // Now, write the updated header:
         end_chunk[orig_len..orig_len + 2].copy_from_slice(&header.as_words());
 

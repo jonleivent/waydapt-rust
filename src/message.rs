@@ -423,6 +423,7 @@ mod test {
 
     struct FakeSessionInfo(Vec<(u32, RInterface)>);
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl SessionInitInfo for FakeSessionInfo {
         fn ucred(&self) -> Option<rustix::net::UCred> { None }
         fn get_active_interfaces(&self) -> &'static ActiveInterfaces { todo!() }
@@ -430,6 +431,7 @@ mod test {
         fn get_debug_level(&self) -> u32 { 0 }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     impl Info for FakeSessionInfo {
         fn try_lookup(&self, _id: u32) -> Option<RInterface> { None }
         fn lookup(&self, _id: u32) -> RInterface { todo!() }

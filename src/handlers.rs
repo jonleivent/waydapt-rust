@@ -45,11 +45,33 @@ struct InterfaceHandlers {
     event_handlers: HandlerMap,
 }
 
+impl InterfaceHandlers {
+    const fn map<const IS_REQUEST: bool>(&mut self) -> &mut HandlerMap {
+        if IS_REQUEST { &mut self.request_handlers } else { &mut self.event_handlers }
+    }
+}
+
 struct AllHandlers {
     message_handlers: HashMap<&'static str, (RInterface, InterfaceHandlers)>,
     session_handlers: &'static mut SessionHandlers,
     mod_name: &'static str,
     active_interfaces: &'static ActiveInterfaces,
+}
+
+impl AddHandlerError {
+    const fn no_such_msg<const IS_REQUEST: bool>() -> Self {
+        if IS_REQUEST { Self::NoSuchRequest } else { Self::NoSuchEvent }
+    }
+
+    const fn inactive<const IS_REQUEST: bool>() -> Self {
+        if IS_REQUEST { Self::InactiveRequest } else { Self::InactiveEvent }
+    }
+}
+
+impl<'a> Interface<'a> {
+    fn get_msg_by_name<const IS_REQUEST: bool>(&self, name: &str) -> Option<&Message<'a>> {
+        if IS_REQUEST { self.get_request_by_name(name) } else { self.get_event_by_name(name) }
+    }
 }
 
 impl AllHandlers {
@@ -96,50 +118,29 @@ impl AllHandlers {
 
     // get the handler queue for a specific interface/message by names
     fn get_handlers<const IS_REQUEST: bool>(
-        &mut self, interface_name: &'static str, msg_name: &'static str,
+        &mut self, iface_name: &'static str, msg_name: &'static str,
     ) -> Result<&mut VecDeque<(&'static str, MessageHandler)>, AddHandlerError> {
         use std::collections::hash_map::Entry;
-        let entry = self.message_handlers.entry(interface_name);
-        let (interface, iface_handlers) = match entry {
-            Entry::Vacant(ve) => {
-                if let Some(interface) = self.active_interfaces.maybe_get_interface(interface_name)
-                {
-                    ve.insert((interface, Default::default()))
-                } else {
-                    return Err(AddHandlerError::NoSuchInterface);
-                }
-            }
+        let ientry = self.message_handlers.entry(iface_name);
+        let (interface, iface_handlers) = match ientry {
+            Entry::Vacant(ve) => ve.insert((
+                self.active_interfaces
+                    .maybe_get_interface(iface_name)
+                    .ok_or(AddHandlerError::NoSuchInterface)?,
+                Default::default(),
+            )),
             Entry::Occupied(oe) => oe.into_mut(),
         };
-        let entry = if IS_REQUEST {
-            iface_handlers.request_handlers.entry(msg_name)
-        } else {
-            iface_handlers.event_handlers.entry(msg_name)
-        };
-        let (_message, msg_handlers) = match entry {
+        let mentry = iface_handlers.map::<IS_REQUEST>().entry(msg_name);
+        let (_message, msg_handlers) = match mentry {
             Entry::Vacant(ve) => {
-                let (maybe_message, inactive_err, no_such_err) = if IS_REQUEST {
-                    (
-                        interface.get_request_by_name(msg_name),
-                        AddHandlerError::InactiveRequest,
-                        AddHandlerError::NoSuchRequest,
-                    )
-                } else {
-                    (
-                        interface.get_event_by_name(msg_name),
-                        AddHandlerError::InactiveEvent,
-                        AddHandlerError::NoSuchEvent,
-                    )
-                };
-                if let Some(message) = maybe_message {
-                    if message.is_active() {
-                        ve.insert((message, Default::default()))
-                    } else {
-                        return Err(inactive_err);
-                    }
-                } else {
-                    return Err(no_such_err);
-                }
+                let message = interface
+                    .get_msg_by_name::<IS_REQUEST>(msg_name)
+                    .ok_or(AddHandlerError::no_such_msg::<IS_REQUEST>())?;
+                message
+                    .is_active()
+                    .then(|| ve.insert((message, Default::default())))
+                    .ok_or(AddHandlerError::inactive::<IS_REQUEST>())?
             }
             Entry::Occupied(oe) => oe.into_mut(),
         };
