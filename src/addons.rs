@@ -146,14 +146,16 @@ mod safeclip {
             if let ArgData::String(s) = msg.get_arg(i) {
                 if arg.name == "mime_type" || arg.name == "title" {
                     let mut sb = s.to_bytes();
-                    if msg_size + prefix.len() > MAX_BYTES_OUT {
+                    let newlen = msg_size + prefix.len();
+                    if newlen > MAX_BYTES_OUT {
                         // The msg would be too long with the prefix added, so truncate the suffix.
                         // This is probably a set_title request, so such truncation is not a big
                         // deal.  If this is a mime-type message, then the truncation might be a
                         // problem, but mime-type strings are very unlikely to be long enough to
                         // cause a problem.  If one gets truncated, it will likely just result in a
                         // copy-paste mismatch, disallowing the copy.
-                        let trunc = sb.len() - prefix.len();
+                        let over = newlen - MAX_BYTES_OUT;
+                        let trunc = sb.len() - over;
                         sb = &sb[..trunc];
                     }
                     let fixed = CString::new([prefix, sb].concat()).unwrap();
@@ -197,5 +199,97 @@ mod safeclip {
             }
         }
         unreachable!("Didn't find string arg named 'mime_type'");
+    }
+
+    #[cfg(test)]
+    mod test {
+        use std::collections::VecDeque;
+
+        use crate::{
+            basics::{MAX_BYTES_OUT, MAX_WORDS_OUT},
+            buffers::privates::{mk_extend_chunk, Chunk},
+            for_handlers::{
+                MessageHandlerResult, MessageInfo, RInterface, SessionInfo, SessionInitInfo,
+            },
+            header::MessageHeader,
+            message::{ArgData, DemarshalledMessage},
+            postparse::ActiveInterfaces,
+            protocol::{Arg, Interface, Message, Type},
+        };
+
+        use super::*;
+        // TBD: Test how add_prefix works when the msg would become too long with the added prefix.  Use
+        // a msg with a mime_type or title string arg and another arg that is a very long array.
+
+        fn fake_msg_decl() -> &'static Message<'static> {
+            let msg = Box::leak(Box::new(Message::new(42)));
+            let args =
+                vec![Arg { name: "title".into(), typ: Type::String, interface_name: None }, Arg {
+                    name: "a".into(),
+                    typ: Type::Array,
+                    interface_name: None,
+                }];
+            msg.args = args;
+            let iface = Box::leak(Box::new(Interface::new()));
+            iface.name = "fake_interface".into();
+            msg.new_id_interface.set(iface).unwrap();
+            msg
+        }
+
+        fn fake_msg_data(data: &mut Chunk) {
+            let s = c"test string".to_bytes_with_nul(); // len=11 with null, 3 words
+            let mut ec = mk_extend_chunk(data);
+            ec.add_u32(0);
+            ec.add_u32(0); // room for header
+            ec.add_array(s); // should take up 4 words total, including len field
+            let left = MAX_WORDS_OUT - 2 - 4 - 1; // -2=hdr, -4=s, -1=arraylen
+            let a: Vec<u8> = vec![0u8; left * 4];
+            ec.add_array(&a);
+            assert_eq!(data.len(), MAX_WORDS_OUT);
+            #[allow(clippy::cast_possible_truncation)]
+            let hdr =
+                MessageHeader { object_id: 13, opcode: 42, size: MAX_BYTES_OUT as u16 }.as_words();
+            data[0] = hdr[0];
+            data[1] = hdr[1];
+        }
+
+        struct FakeSessionInfo(Vec<(u32, RInterface)>);
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        impl SessionInitInfo for FakeSessionInfo {
+            fn ucred(&self) -> Option<rustix::net::UCred> { None }
+            fn get_active_interfaces(&self) -> &'static ActiveInterfaces { todo!() }
+            fn get_display(&self) -> RInterface { todo!() } // wl_display
+            fn get_debug_level(&self) -> u32 { 0 }
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        impl SessionInfo for FakeSessionInfo {
+            fn try_lookup(&self, _id: u32) -> Option<RInterface> { None }
+            fn lookup(&self, _id: u32) -> RInterface { todo!() }
+            fn add(&mut self, id: u32, interface: RInterface) { self.0.push((id, interface)); }
+            fn delete(&mut self, _id: u32) {}
+        }
+
+        #[test]
+        fn test_add_prefix_overflow() {
+            let msg_decl = fake_msg_decl();
+            let mut data = Chunk::new();
+            fake_msg_data(&mut data);
+            let hdr = MessageHeader::new(&data);
+            let mut msg = DemarshalledMessage::new(hdr, msg_decl, &data);
+            let mut fsi = FakeSessionInfo(Vec::new());
+            msg.demarshal(&mut VecDeque::new(), &mut fsi);
+            let ArgData::String(s) = msg.get_arg(0) else { panic!() };
+            assert_eq!(s.as_ref(), c"test string");
+            PREFIX.set("pre".as_bytes().into()).unwrap();
+            assert_eq!(add_prefix(&mut msg, &mut fsi), MessageHandlerResult::Next);
+            let ArgData::String(s) = msg.get_arg(0) else { panic!() };
+            // add_prefix should add the "pre" prefix, but truncate the "test string" as a result:
+            assert_eq!(s.as_ref(), c"pretest str");
+        }
+
+        // TBD: maybe add another addon module that is just for testing.  This would allow us to test
+        // session init handlers, which safeclip doesn't use.
     }
 }

@@ -32,6 +32,7 @@ pub trait SessionInfo: SessionInitInfo {
     fn delete(&mut self, id: u32);
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub enum MessageHandlerResult {
     Next,
     Send,
