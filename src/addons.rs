@@ -138,9 +138,14 @@ mod safeclip {
     pub(super) const INIT_HANDLER: InitHandlersFun = init_handler;
 
     fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
-        // find the first String arg and add PREFIX to the front of it:
+        // separate access of PREFIX for testing purposes, so that the tests do not need to modify
+        // PREFIX:
+        add_prefix_internal(msg, PREFIX.get().unwrap())
+    }
+
+    fn add_prefix_internal(msg: &mut dyn MessageInfo, prefix: &[u8]) -> MessageHandlerResult {
+        // find the first String arg and add prefix to the front of it:
         let msg_size = msg.get_size();
-        let prefix = PREFIX.get().unwrap();
         let msg_decl = msg.get_decl();
         for (i, arg) in msg_decl.args.iter().enumerate() {
             if let ArgData::String(s) = msg.get_arg(i) {
@@ -174,8 +179,13 @@ mod safeclip {
     }
 
     fn remove_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
-        // find the first String arg and remove PREFIX from the front of it:
-        let prefix = PREFIX.get().unwrap();
+        // separate access of PREFIX for testing purposes, so that the tests do not need to modify
+        // PREFIX:
+        remove_prefix_internal(msg, PREFIX.get().unwrap())
+    }
+
+    fn remove_prefix_internal(msg: &mut dyn MessageInfo, prefix: &[u8]) -> MessageHandlerResult {
+        // find the first String arg and remove prefix from the front of it:
         let plen = prefix.len();
         let msg_decl = msg.get_decl();
         for (i, arg) in msg_decl.args.iter().enumerate() {
@@ -282,8 +292,8 @@ mod safeclip {
             msg.demarshal(&mut VecDeque::new(), &mut fsi);
             let ArgData::String(s) = msg.get_arg(0) else { panic!() };
             assert_eq!(s.as_ref(), c"test string");
-            PREFIX.set("pre".as_bytes().into()).unwrap();
-            assert_eq!(add_prefix(&mut msg, &mut fsi), MessageHandlerResult::Next);
+            let prefix = "pre".as_bytes();
+            assert_eq!(add_prefix_internal(&mut msg, prefix), MessageHandlerResult::Next);
             let ArgData::String(s) = msg.get_arg(0) else { panic!() };
             // add_prefix should add the "pre" prefix, but truncate the "test string" as a result:
             assert_eq!(s.as_ref(), c"pretest str");
