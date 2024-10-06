@@ -25,6 +25,8 @@ pub mod setup;
 pub mod socket_events;
 pub mod streams;
 pub mod terminator;
+#[cfg(test)]
+pub mod test_utils;
 pub mod version_info;
 
 fn main() { setup::startup() }

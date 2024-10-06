@@ -449,7 +449,8 @@ mod tests {
     use std::array;
     use std::os::unix::net::UnixStream;
 
-    use crate::basics::{test_util::*, to_u8_slice};
+    use crate::basics::to_u8_slice;
+    use crate::test_utils::*;
 
     use super::*;
 

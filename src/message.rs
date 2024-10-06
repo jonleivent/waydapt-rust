@@ -327,153 +327,29 @@ impl<'a> MessageInfo<'a> for DemarshalledMessage<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::collections::VecDeque;
-
-    use crate::{
-        basics::test_util::*, buffers::privates::*, for_handlers::SessionInitInfo,
-        postparse::ActiveInterfaces, protocol::Arg,
-    };
+    use crate::{buffers::privates::Chunk, test_utils::*};
 
     use super::*;
 
-    fn fake_msg_decl() -> &'static Message<'static> {
-        let msg = Box::leak(Box::new(Message::new(42)));
-        msg.name = "fake_msg".into();
-        let args = vec![
-            Arg { name: "a_int".into(), typ: Type::Int, interface_name: None },
-            Arg { name: "a_uint".into(), typ: Type::Uint, interface_name: None },
-            Arg { name: "a_fixed".into(), typ: Type::Fixed, interface_name: None },
-            Arg { name: "a_string".into(), typ: Type::String, interface_name: None },
-            Arg { name: "an_object".into(), typ: Type::Object, interface_name: None },
-            Arg { name: "an_array".into(), typ: Type::Array, interface_name: None },
-            Arg { name: "an_fd".into(), typ: Type::Fd, interface_name: None },
-            Arg { name: "an_fd".into(), typ: Type::Fd, interface_name: None },
-            Arg {
-                name: "a_new_id".into(),
-                typ: Type::NewId,
-                interface_name: Some("fake_interface".into()),
-            },
-        ];
-        msg.args = args;
-        let iface = Box::leak(Box::new(Interface::new()));
-        iface.name = "fake_interface".into();
-        msg.new_id_interface.set(iface).unwrap();
-        msg
+    fn fake_msg(fmm: &mut FakeMsgMaker) {
+        fmm.add_int("a_int", 0x1234_5678); //0
+        fmm.add_uint("a_uint", 0x90ab_cdef); //1
+        fmm.add_fixed("a_fixed", 0x1357_9ace); //2
+        fmm.add_string("a_string", b"abcdefghijklmnopqrstuvwxyz\0"); //3
+        fmm.add_object("an_object", 9876); //4
+        fmm.add_array("an_array", b"0123456789"); //5
+        fmm.add_fd("an_fd1", 1); //6
+        let interface = Box::leak(Box::new(Interface::new()));
+        interface.name = "fake_interface".into();
+        fmm.add_new_id("a_new_id", 5432, Some(interface)); //7
+        fmm.add_fd("an_fd2", 2); //8
     }
 
-    fn fake_msg_data() -> Vec<u32> {
-        let mut data = vec![
-            0,
-            0,           // room for header later
-            0x1234_5678, // a_int
-            0x90ab_cdef, // a_uint
-            0x1357_9ace, // a_fixed
-            27,          //a_string length, including final 0
-            u32::from_ne_bytes(*b"abcd"),
-            u32::from_ne_bytes(*b"efgh"),
-            u32::from_ne_bytes(*b"ijkl"),
-            u32::from_ne_bytes(*b"mnop"),
-            u32::from_ne_bytes(*b"qrst"),
-            u32::from_ne_bytes(*b"uvwx"),
-            u32::from_ne_bytes(*b"yz\0\0"),
-            9876, // an object id
-            10,   // an_array length
-            u32::from_ne_bytes(*b"0123"),
-            u32::from_ne_bytes(*b"4567"),
-            u32::from_ne_bytes(*b"89\0\0"),
-            // the fds take up no data
-            5432, // a new_id
-        ];
-        #[allow(clippy::cast_possible_truncation)]
-        let hdr =
-            MessageHeader { object_id: 13, opcode: 42, size: data.len() as u16 * 4 }.as_words();
-        data[0] = hdr[0];
-        data[1] = hdr[1];
-        data
-    }
-
-    fn fake_msg_data_modified() -> Vec<u32> {
-        let mut data = vec![
-            0,
-            0,           // room for header later
-            0x5678_1234, // a_int
-            0x90ab_cdef, // a_uint
-            0x9ace_1357, // a_fixed
-            13,          //a_string length, including final 0
-            u32::from_ne_bytes(*b"ABCD"),
-            u32::from_ne_bytes(*b"IJKL"),
-            u32::from_ne_bytes(*b"QRST"),
-            0,
-            9876, // an object id
-            16,   // an_array length
-            u32::from_ne_bytes(*b"abcd"),
-            u32::from_ne_bytes(*b"0123"),
-            u32::from_ne_bytes(*b"4567"),
-            u32::from_ne_bytes(*b"890!"),
-            // the fds take up no data
-            5432, // a new_id
-        ];
-        #[allow(clippy::cast_possible_truncation)]
-        let hdr =
-            MessageHeader { object_id: 13, opcode: 42, size: data.len() as u16 * 4 }.as_words();
-        data[0] = hdr[0];
-        data[1] = hdr[1];
-        data
-    }
-
-    struct FakeSessionInfo(Vec<(u32, RInterface)>);
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    impl SessionInitInfo for FakeSessionInfo {
-        fn ucred(&self) -> Option<rustix::net::UCred> { None }
-        fn get_active_interfaces(&self) -> &'static ActiveInterfaces { todo!() }
-        fn get_display(&self) -> RInterface { todo!() } // wl_display
-        fn get_debug_level(&self) -> u32 { 0 }
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    impl Info for FakeSessionInfo {
-        fn try_lookup(&self, _id: u32) -> Option<RInterface> { None }
-        fn lookup(&self, _id: u32) -> RInterface { todo!() }
-        fn add(&mut self, id: u32, interface: RInterface) { self.0.push((id, interface)); }
-        fn delete(&mut self, _id: u32) {}
-    }
-
-    struct FakeMessenger(Chunk, Vec<OwnedFd>);
-
-    impl MO for FakeMessenger {
-        fn send(
-            &mut self, fds: impl IntoIterator<Item = OwnedFd>,
-            msgfun: impl FnOnce(ExtendChunk) -> MessageHeader,
-        ) -> IoResult<usize> {
-            #![allow(clippy::cast_possible_truncation)]
-            self.0.push(0);
-            self.0.push(0); // room for header
-            let mut hdr = msgfun(mk_extend_chunk(&mut self.0));
-            hdr.size = self.0.len() as u16 * 4;
-            let w = hdr.as_words();
-            self.0[0] = w[0];
-            self.0[1] = w[1];
-            self.1.extend(fds);
-            Ok(self.0.len())
-        }
-
-        fn send_raw(
-            &mut self, _fds: impl IntoIterator<Item = OwnedFd>, _raw_msg: &[u32],
-        ) -> IoResult<usize> {
-            todo!()
-        }
-    }
-
-    fn test_msg(msg_data: &mut Vec<u32>) -> DemarshalledMessage<'_> {
-        let msg_decl = fake_msg_decl();
-        *msg_data = fake_msg_data();
-        let hdr = MessageHeader::new(msg_data);
-        let mut dm = DemarshalledMessage::new(hdr, msg_decl, msg_data);
-        let mut vdq: VecDeque<OwnedFd> = VecDeque::new();
+    fn test_msg<'a>(fmm: &mut FakeMsgMaker, chunk: &'a mut Chunk) -> DemarshalledMessage<'a> {
+        let (msg_decl, mut vdq) = fmm.produce(chunk);
+        let hdr = MessageHeader::new(chunk);
+        let mut dm = DemarshalledMessage::new(hdr, msg_decl, &chunk[..]);
         let mut fsi = FakeSessionInfo(Vec::new());
-        vdq.push_back(fd_for_test(1));
-        vdq.push_back(fd_for_test(2));
         dm.demarshal(&mut vdq, &mut fsi);
 
         assert_eq!(dm.get_num_args(), 9);
@@ -486,9 +362,10 @@ mod test {
         let ArgData::Array(Cow::Borrowed(a)) = dm.get_arg(5) else { panic!() };
         assert_eq!(a, b"0123456789");
         matches!(dm.get_arg(6), ArgData::Fd { index: 0 });
-        let ArgData::NewId { id: 5432, interface } = dm.get_arg(8) else { panic!() };
+        let ArgData::NewId { id: 5432, interface } = dm.get_arg(7) else { panic!() };
         assert_eq!(interface.name, msg_decl.new_id_interface.get().unwrap().name);
-        assert_eq!(msg_decl.find_new_id(msg_data), 5432);
+        assert_eq!(msg_decl.find_new_id(chunk), 5432);
+        matches!(dm.get_arg(7), ArgData::Fd { index: 1 });
 
         assert_eq!(fsi.0.len(), 1);
         let (id, iface) = fsi.0[0];
@@ -501,15 +378,17 @@ mod test {
     }
 
     fn test_demarshal(check_types: bool) {
-        let mut msg_data = Vec::new();
-        let dm = test_msg(&mut msg_data);
+        let mut fmm = FakeMsgMaker::new(42, 13);
+        fake_msg(&mut fmm);
+        let mut chunk = Chunk::new();
+        let dm = test_msg(&mut fmm, &mut chunk);
         let mut fm = FakeMessenger(Chunk::new(), Vec::new());
         if check_types {
-            assert_eq!(dm.marshal_modified_check_types(&mut fm).unwrap(), msg_data.len());
+            assert_eq!(dm.marshal_modified_check_types(&mut fm).unwrap(), chunk.len());
         } else {
-            assert_eq!(dm.marshal_modified(&mut fm).unwrap(), msg_data.len());
+            assert_eq!(dm.marshal_modified(&mut fm).unwrap(), chunk.len());
         }
-        assert_eq!(&msg_data[..], &fm.0[..]);
+        assert_eq!(&chunk[..], &fm.0[..]);
         assert_eq!(fm.1.len(), 2);
         assert!(check_test_fd(&fm.1[0], 1));
         assert!(check_test_fd(&fm.1[1], 2));
@@ -522,26 +401,73 @@ mod test {
     fn test_demarshal2() { test_demarshal(true); }
 
     #[test]
-    fn test_demarshal_modified1() {
+    fn test_modified1() {
         #![allow(clippy::cast_possible_wrap)]
-        let mut msg_data = Vec::new();
-        let mut dm = test_msg(&mut msg_data);
+        let mut fmm = FakeMsgMaker::new(42, 13);
+        fake_msg(&mut fmm);
+        let mut chunk = Chunk::new();
+        let mut dm = test_msg(&mut fmm, &mut chunk);
 
         *dm.get_arg_mut(0) = ArgData::Int(0x5678_1234);
+        fmm.mod_scalar_arg(0, 0x5678_1234);
+
         *dm.get_arg_mut(2) = ArgData::Fixed(0x9ace_1357_u32 as i32);
+        fmm.mod_scalar_arg(2, 0x9ace_1357);
+
         let ArgData::String(ref mut c) = dm.get_arg_mut(3) else { panic!() };
-        *c = c"ABCDIJKLQRST".into();
+        let c2 = c"ABCDIJKLQRST";
+        *c = c2.into();
+        fmm.mod_vector_arg(3, c2.to_bytes_with_nul());
+
         let ArgData::Array(ref mut a) = dm.get_arg_mut(5) else { panic!() };
-        *a = b"abcd01234567890!".into();
+        let a2 = b"abcd01234567890!";
+        *a = a2.into();
+        fmm.mod_vector_arg(5, a2);
 
-        let mod_msg_data = fake_msg_data_modified();
-        assert_eq!(dm.msg_decl.find_new_id(&mod_msg_data), 5432);
+        let msg_decl = dm.msg_decl;
 
+        assert_eq!(msg_decl.find_new_id(dm.source), 5432);
+
+        let mut chunk2 = Chunk::new();
+        let (msg_decl, mut fds) = fmm.produce(&mut chunk2);
+        assert!(check_test_fd(&fds[0], 1));
+        assert!(check_test_fd(&fds[1], 2));
+
+        // demarshal the chunk2 and compare
+        let hdr = MessageHeader::new(&chunk2);
+        let mut dm2 = DemarshalledMessage::new(hdr, msg_decl, &chunk2[..]);
+        let mut fsi = FakeSessionInfo(Vec::new());
+        dm2.demarshal(&mut fds, &mut fsi);
+        // now, dm and dm2 should match arg for arg:
+        assert_eq!(dm.args.len(), dm2.args.len());
+        for aa in dm.args.iter().zip(dm2.args.iter()) {
+            use ArgData::*;
+            match aa {
+                #![allow(clippy::match_same_arms)]
+                (Int(i1), Int(i2)) => assert_eq!(i1, i2),
+                (Uint(u1), Uint(u2)) => assert_eq!(u1, u2),
+                (Fixed(f1), Fixed(f2)) => assert_eq!(f1, f2),
+                (String(s1), String(s2)) => assert_eq!(s1, s2),
+                (Object(u1), Object(u2)) => assert_eq!(u1, u2),
+                (NewId { id: i1, .. }, NewId { id: i2, .. }) => assert_eq!(i1, i2),
+                (Array(a1), Array(a2)) => assert_eq!(a1, a2),
+                (Fd { index: i1 }, Fd { index: i2 }) => assert_eq!(i1, i2),
+                _ => panic!("aa is {aa:?}"),
+            }
+        }
+
+        // test that the marshalling of the modified message produces the same data FakeMsgMaker
         let mut fm = FakeMessenger(Chunk::new(), Vec::new());
-        assert_eq!(dm.marshal(&mut fm).unwrap(), mod_msg_data.len());
-        assert_eq!(&mod_msg_data[..], &fm.0[..]);
+        dm.marshal(&mut fm).unwrap();
+        assert_eq!(msg_decl.find_new_id(&fm.0), 5432);
+
         assert_eq!(fm.1.len(), 2);
         assert!(check_test_fd(&fm.1[0], 1));
         assert!(check_test_fd(&fm.1[1], 2));
+
+        assert_eq!(fm.0.len(), chunk2.len());
+        for i in 0..chunk2.len() {
+            assert_eq!(fm.0[i], chunk2[i]);
+        }
     }
 }
