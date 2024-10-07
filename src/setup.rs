@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::{fs::File, io::BufWriter};
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub(crate) struct SharedOptions {
     pub(crate) terminate_after: Option<Duration>,
@@ -27,6 +28,8 @@ pub(crate) struct SharedOptions {
     pub(crate) flush_every_send: bool,
     pub(crate) watch_server: bool,
     pub(crate) single_mode: bool,
+    #[cfg(feature = "forking")]
+    pub(crate) fork_mode: bool,
 }
 
 static MAIN_THREAD: OnceLock<pthread::Pthread> = OnceLock::new();
@@ -107,11 +110,21 @@ impl SharedOptions {
             },
             watch_server: matches.opt_present("w"),
             single_mode: matches.opt_present("s"),
+            #[cfg(feature = "forking")]
+            fork_mode: matches.opt_present("c"),
         });
         assert!(
             !(so.terminate_after.is_some() && so.single_mode),
             "-t and -s are mutually exclusive"
         );
+        #[cfg(feature = "forking")]
+        {
+            assert!(!(so.single_mode && so.fork_mode), "-c and -s are mutually exclusive");
+            assert!(
+                !(so.terminate_after.is_some() && so.fork_mode),
+                "-t and -c are mutually exclusive"
+            );
+        }
         so
     }
 }
@@ -155,7 +168,7 @@ fn globals_and_handlers(
 
 fn start_listening(matches: &Matches) -> SocketListener {
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
-    let listener = SocketListener::new(display_name);
+    let listener = SocketListener::new(display_name); // socket is ready after this
 
     // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
     if let Some(anti_lock_fd) = matches.opt_str("a") {
@@ -169,6 +182,14 @@ fn start_listening(matches: &Matches) -> SocketListener {
             // should we bother trying to close it?  That is more unsafe, because the fd might be
             // manifested as an OnwedFd elsewhere that expects to stay open for its lifetime.
         }
+    };
+
+    // Daemonize after the socket is ready (another way clients can be notified of readiness):
+    #[cfg(feature = "forking")]
+    if matches.opt_present("z") {
+        use crate::forking::daemonize;
+        #[allow(unsafe_code)]
+        unsafe { daemonize() }.unwrap_or_else(|e| panic!("Could not daemonize!: {e:?}"));
     };
 
     listener
@@ -206,6 +227,12 @@ fn get_options() -> Options {
         .optopt("t", "terminate", "terminate after last client and no others for secs", "SECS")
         .optflag("v", "version", "show version info and exit")
         .optflag("w", "watchserver", "exit when server exits");
+
+    #[cfg(feature = "forking")]
+    {
+        opts.optflag("c", "childprocs", "Fork client sessions into child processes");
+        opts.optflag("z", "daemonize", "Daemonize when client socket is ready");
+    }
     opts
 }
 

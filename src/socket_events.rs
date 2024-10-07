@@ -73,6 +73,18 @@ impl SocketEventHandler {
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
             Err(e) => return Err(e),
         };
+
+        #[cfg(feature = "forking")]
+        if self.options.fork_mode {
+            use crate::forking::{double_fork, ForkResult};
+            #[allow(unsafe_code)]
+            return match unsafe { double_fork() } {
+                Ok(ForkResult::Child) => Ok(Some(client_stream)),
+                Ok(ForkResult::Parent { .. }) => Ok(None),
+                Err(e) => Err(e.into()),
+            };
+        }
+
         if self.options.single_mode {
             // let the top-level in setup run the client session after the socket and epoll fds are closed:
             Ok(Some(client_stream))

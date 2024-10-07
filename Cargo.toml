@@ -9,11 +9,13 @@ no_linked_list = []
 always_compact = []
 fast_compact = []
 limit_sends = []
-default = [ "always_compact", "fast_compact", "limit_sends" ]
+forking = []
+default = [ "always_compact", "fast_compact", "limit_sends", "forking" ]
 
 [dependencies]
 arrayvec = "0.7.4"
 getopts = "0.2.21"
+num_threads = "0.1.7"
 quick-xml = "0.31.0"
 smallvec = "1.13.2"
 

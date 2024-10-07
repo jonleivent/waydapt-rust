@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::inline_always)]
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -46,8 +47,13 @@ struct InterfaceHandlers {
 }
 
 impl InterfaceHandlers {
-    const fn map<const IS_REQUEST: bool>(&mut self) -> &mut HandlerMap {
-        if IS_REQUEST { &mut self.request_handlers } else { &mut self.event_handlers }
+    #[inline(always)]
+    fn map<const IS_REQUEST: bool>(&mut self) -> &mut HandlerMap {
+        if IS_REQUEST {
+            &mut self.request_handlers
+        } else {
+            &mut self.event_handlers
+        }
     }
 }
 
@@ -60,17 +66,29 @@ struct AllHandlers {
 
 impl AddHandlerError {
     const fn no_such_msg<const IS_REQUEST: bool>() -> Self {
-        if IS_REQUEST { Self::NoSuchRequest } else { Self::NoSuchEvent }
+        if IS_REQUEST {
+            Self::NoSuchRequest
+        } else {
+            Self::NoSuchEvent
+        }
     }
 
     const fn inactive<const IS_REQUEST: bool>() -> Self {
-        if IS_REQUEST { Self::InactiveRequest } else { Self::InactiveEvent }
+        if IS_REQUEST {
+            Self::InactiveRequest
+        } else {
+            Self::InactiveEvent
+        }
     }
 }
 
 impl<'a> Interface<'a> {
     fn get_msg_by_name<const IS_REQUEST: bool>(&self, name: &str) -> Option<&Message<'a>> {
-        if IS_REQUEST { self.get_request_by_name(name) } else { self.get_event_by_name(name) }
+        if IS_REQUEST {
+            self.get_request_by_name(name)
+        } else {
+            self.get_event_by_name(name)
+        }
     }
 }
 

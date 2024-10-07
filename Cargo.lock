@@ -528,6 +528,7 @@ dependencies = [
  "arrayvec",
  "getopts",
  "nix",
+ "num_threads",
  "quick-xml",
  "rustix",
  "smallvec",
