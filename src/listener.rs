@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use rustix::process::{getpid, Pid};
 use std::env;
 use std::fs::{remove_file, File, Metadata};
 use std::ops::Deref;
@@ -13,6 +14,7 @@ pub(crate) struct SocketListener {
     lock_path: PathBuf,
     #[allow(unused)]
     lock_file: File, // own this so that it drops (and so unlocks) with us
+    init_pid: Pid,
 }
 
 impl Drop for SocketListener {
@@ -24,8 +26,10 @@ impl Drop for SocketListener {
         // be nice if Linux had a version of unlink that took a path AND some other proof that we
         // have the right file, like a dev/inode pair, and verify atomically that the path and
         // dev/inode pair refer to the same file before unlinking atomically with that verification.
-        remove_file(&self.socket_path).unwrap();
-        remove_file(&self.lock_path).unwrap();
+        if self.init_pid == getpid() {
+            remove_file(&self.socket_path).unwrap();
+            remove_file(&self.lock_path).unwrap();
+        }
     }
 }
 
@@ -55,8 +59,12 @@ impl SocketListener {
         }
         let unix_listener = UnixListener::bind(&socket_path).unwrap();
         unix_listener.set_nonblocking(true).unwrap();
-        Self { socket_path, unix_listener, lock_path, lock_file }
+        let init_pid = getpid();
+        Self { socket_path, unix_listener, lock_path, lock_file, init_pid }
     }
+
+    // Call this after daemonizing, so that the daemon doesn't fail to do the cleanup in drop:
+    pub(crate) fn reset_init_pid(&mut self) { self.init_pid = getpid(); }
 }
 
 impl Deref for SocketListener {

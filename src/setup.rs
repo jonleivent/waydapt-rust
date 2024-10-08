@@ -168,7 +168,7 @@ fn globals_and_handlers(
 
 fn start_listening(matches: &Matches) -> SocketListener {
     let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
-    let listener = SocketListener::new(display_name); // socket is ready after this
+    let mut listener = SocketListener::new(display_name); // socket is ready after this
 
     // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
     if let Some(anti_lock_fd) = matches.opt_str("a") {
@@ -190,6 +190,8 @@ fn start_listening(matches: &Matches) -> SocketListener {
         use crate::forking::daemonize;
         #[allow(unsafe_code)]
         unsafe { daemonize() }.unwrap_or_else(|e| panic!("Could not daemonize!: {e:?}"));
+
+        listener.reset_init_pid();
     };
 
     listener
