@@ -79,7 +79,9 @@ impl SocketEventHandler {
             use crate::forking::{double_fork, ForkResult};
             #[allow(unsafe_code)]
             return match unsafe { double_fork() } {
+                // The child runs as if in single_mode:
                 Ok(ForkResult::Child) => Ok(Some(client_stream)),
+                // The parent continues its event loop:
                 Ok(ForkResult::Parent { .. }) => Ok(None),
                 Err(e) => Err(e.into()),
             };

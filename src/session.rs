@@ -8,6 +8,7 @@ use crate::for_handlers::{SessionInitHandler, SessionInitInfo};
 use crate::mediator::Mediator;
 use crate::postparse::ActiveInterfaces;
 use crate::protocol::Interface;
+use crate::setup::SharedOptions;
 use crate::streams::IOStream;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
@@ -116,7 +117,7 @@ pub(crate) fn get_server_stream() -> UnixStream {
 // multithread_exit if options.fork_sessions is false (which indicates multithreaded mode).
 // Otherwise panic or quivalent (unwrap).  Everything in here should just panic:
 pub(crate) fn client_session(
-    options: &'static crate::setup::SharedOptions, active_interfaces: &'static ActiveInterfaces,
+    options: &'static SharedOptions, active_interfaces: &'static ActiveInterfaces,
     session_handlers: &VecDeque<SessionInitHandler>, client_stream: UnixStream,
 ) {
     use crate::terminator::SessionTerminator;

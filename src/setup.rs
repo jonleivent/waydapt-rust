@@ -14,7 +14,9 @@ use signal::Signal;
 use std::collections::HashMap;
 use std::env::Args;
 use std::io::ErrorKind;
+use std::io::Result as IoResult;
 use std::os::fd::BorrowedFd;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -71,21 +73,10 @@ pub(crate) fn startup() {
     // do all protocol and globals parsing, and handler linkups:
     let (interfaces, handlers) = globals_and_handlers(&matches, all_args, &init_handlers);
 
-    // Keep global track of this main thread for signalling purposes
-    MAIN_THREAD.set(pthread::pthread_self()).unwrap();
-
-    let res = {
-        // Start listening on the socket for our clients:
-        let listener = start_listening(&matches);
-
-        let mut socket_event_handler =
-            SocketEventHandler::new(listener, options, interfaces, handlers);
-
-        // accept new clients
-        crate::event_loop::event_loop(&mut socket_event_handler)
-    };
-    match res {
-        Ok(client_stream) => client_session(options, interfaces, handlers, client_stream), // -s
+    // Note - if using thread-spawning (no -c or -s options), the client session is started within
+    // the event loop inside listen, and only errors are returned below:
+    match listen(&matches, options, interfaces, handlers) {
+        Ok(client_stream) => client_session(options, interfaces, handlers, client_stream), // -c|-s
         Err(e) => match (e.kind(), e.into_inner()) {
             (ErrorKind::Interrupted, Some(i)) => eprintln!("Interrupted with {i}"),
             (ErrorKind::Interrupted, None) => eprintln!("Interrupted"),
@@ -95,6 +86,52 @@ pub(crate) fn startup() {
             (k, None) => panic!("{k}"),
         },
     };
+}
+
+fn listen(
+    matches: &Matches, options: &'static SharedOptions, interfaces: &'static ActiveInterfaces,
+    handlers: &'static SessionHandlers,
+) -> IoResult<UnixStream> {
+    // Group the listener and event handler here so that they are both dropped in the -c|-s cases
+    // before we start the client_session:
+
+    let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
+    let mut listener = SocketListener::new(display_name); // socket is ready after this
+
+    // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
+    if let Some(anti_lock_fd) = matches.opt_str("a") {
+        let raw = anti_lock_fd.parse().expect("-a fd : must be an int");
+        assert!(raw >= 0, "-a {raw}: fd must not be negative");
+        #[allow(unsafe_code)]
+        unsafe {
+            flock(BorrowedFd::borrow_raw(raw), FlockOperation::Unlock).unwrap_or_else(|e| {
+                panic!("Anti-lock (-a) fd={raw} does not correspond to an open file or dir: {e}");
+            });
+            // should we bother trying to close it?  That is more unsafe, because the fd might be
+            // manifested as an OnwedFd elsewhere that expects to stay open for its lifetime.
+        }
+    };
+
+    // Daemonize after the socket is ready (another way clients can be notified of readiness):
+    #[cfg(feature = "forking")]
+    if matches.opt_present("z") {
+        use crate::forking::daemonize;
+        #[allow(unsafe_code)]
+        unsafe { daemonize() }.unwrap_or_else(|e| panic!("Could not daemonize!: {e:?}"));
+
+        listener.reset_init_pid();
+    };
+
+    // Keep global track of this main thread for signalling purposes - do this after any potential
+    // daemonizing (above) since daemonizing can change the main thread's id.  Even though we don't
+    // currently use MAIN_THREAD in the daeminizing case.
+    MAIN_THREAD.set(pthread::pthread_self()).unwrap();
+
+    let mut socket_event_handler = SocketEventHandler::new(listener, options, interfaces, handlers);
+
+    // accept new clients - this only returns Ok with -c or -s options.  In other cases, it
+    // spawns the client sessions internally as threads:
+    crate::event_loop::event_loop(&mut socket_event_handler)
 }
 
 impl SharedOptions {
@@ -164,37 +201,6 @@ fn globals_and_handlers(
     }
 
     (active_interfaces, session_handlers)
-}
-
-fn start_listening(matches: &Matches) -> SocketListener {
-    let display_name = &matches.opt_str("d").unwrap_or("waydapt-0".into()).into();
-    let mut listener = SocketListener::new(display_name); // socket is ready after this
-
-    // If we've been given an anti-lock fd, unlock it now to allow clients waiting on it to start:
-    if let Some(anti_lock_fd) = matches.opt_str("a") {
-        let raw: u32 = anti_lock_fd.parse().expect("-a fd : must be a u32");
-        #[allow(unsafe_code)]
-        unsafe {
-            #[allow(clippy::cast_possible_wrap)]
-            flock(BorrowedFd::borrow_raw(raw as i32), FlockOperation::Unlock).unwrap_or_else(|e| {
-                panic!("Anti-lock (-a) fd={raw} does not correspond to an open file or dir: {e}");
-            });
-            // should we bother trying to close it?  That is more unsafe, because the fd might be
-            // manifested as an OnwedFd elsewhere that expects to stay open for its lifetime.
-        }
-    };
-
-    // Daemonize after the socket is ready (another way clients can be notified of readiness):
-    #[cfg(feature = "forking")]
-    if matches.opt_present("z") {
-        use crate::forking::daemonize;
-        #[allow(unsafe_code)]
-        unsafe { daemonize() }.unwrap_or_else(|e| panic!("Could not daemonize!: {e:?}"));
-
-        listener.reset_init_pid();
-    };
-
-    listener
 }
 
 fn get_options() -> Options {
