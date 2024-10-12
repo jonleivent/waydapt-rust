@@ -39,9 +39,11 @@ pub enum MessageHandlerResult {
     Drop,
 }
 
-pub type MessageHandler = fn(&mut dyn MessageInfo, &mut dyn SessionInfo) -> MessageHandlerResult;
+// The usize final args are for the addon group (starting from 0 on the command line)
+pub type MessageHandler =
+    fn(&mut dyn MessageInfo, &mut dyn SessionInfo, usize) -> MessageHandlerResult;
 
-pub type SessionInitHandler = fn(&dyn SessionInitInfo);
+pub type SessionInitHandler = fn(&dyn SessionInitInfo, usize);
 
 #[derive(Debug)]
 pub enum AddHandlerError {
@@ -74,4 +76,4 @@ pub trait AddHandler {
     fn session_push_back(&mut self, handler: SessionInitHandler);
 }
 
-pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces);
+pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces, usize);

@@ -19,13 +19,14 @@ pub(crate) struct SocketEventHandler {
     server_stream: Option<UnixStream>,
     options: &'static SharedOptions,
     interfaces: &'static ActiveInterfaces,
-    handlers: &'static VecDeque<SessionInitHandler>,
+    handlers: &'static VecDeque<(SessionInitHandler, usize)>,
 }
 
 impl SocketEventHandler {
     pub(crate) fn new(
         listener: SocketListener, options: &'static SharedOptions,
-        interfaces: &'static ActiveInterfaces, handlers: &'static VecDeque<SessionInitHandler>,
+        interfaces: &'static ActiveInterfaces,
+        handlers: &'static VecDeque<(SessionInitHandler, usize)>,
     ) -> Self {
         // Mask and handle these signals:
         let mut mask = SigSet::empty();

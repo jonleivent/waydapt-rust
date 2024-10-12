@@ -48,7 +48,7 @@ mod safeclip {
     use std::{
         borrow::Cow,
         ffi::{CStr, CString},
-        sync::OnceLock,
+        sync::RwLock,
     };
 
     use crate::for_handlers::{
@@ -58,7 +58,8 @@ mod safeclip {
 
     use super::InitHandlersFun;
 
-    static PREFIX: OnceLock<Vec<u8>> = OnceLock::new();
+    // a vector, indexed by group number, of byte vectors:
+    static PREFIX: RwLock<Vec<Vec<u8>>> = RwLock::new(Vec::new());
 
     #[inline]
     fn has_mime_type_arg(msg: &Message<'_>) -> bool {
@@ -103,10 +104,18 @@ mod safeclip {
 
     fn init_handler(
         args: &[String], adder: &mut dyn AddHandler, active_interfaces: &'static ActiveInterfaces,
+        group: usize,
     ) {
         // Unlike the C waydapt, the 0th arg is NOT the dll name, it is our first arg.
         assert_eq!(args.len(), 1);
-        PREFIX.set(args[0].as_bytes().into()).unwrap();
+        let prefix = args[0].as_bytes().into();
+        {
+            let mut v = PREFIX.write().unwrap();
+            if v.len() <= group {
+                v.resize_with(group + 1, Vec::new);
+            }
+            v[group] = prefix;
+        }
 
         // We do not need a session init handler, because there is no per-session state
 
@@ -137,10 +146,14 @@ mod safeclip {
 
     pub(super) const INIT_HANDLER: InitHandlersFun = init_handler;
 
-    fn add_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
+    fn add_prefix(
+        msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo, group: usize,
+    ) -> MessageHandlerResult {
         // separate access of PREFIX for testing purposes, so that the tests do not need to modify
         // PREFIX:
-        add_prefix_internal(msg, PREFIX.get().unwrap())
+        let guard = PREFIX.read().unwrap();
+        let prefix = &guard[group];
+        add_prefix_internal(msg, prefix)
     }
 
     fn add_prefix_internal(msg: &mut dyn MessageInfo, prefix: &[u8]) -> MessageHandlerResult {
@@ -178,10 +191,14 @@ mod safeclip {
         s.len() >= plen && prefix == &s[..plen]
     }
 
-    fn remove_prefix(msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo) -> MessageHandlerResult {
+    fn remove_prefix(
+        msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo, group: usize,
+    ) -> MessageHandlerResult {
         // separate access of PREFIX for testing purposes, so that the tests do not need to modify
         // PREFIX:
-        remove_prefix_internal(msg, PREFIX.get().unwrap())
+        let guard = PREFIX.read().unwrap();
+        let prefix = &guard[group];
+        remove_prefix_internal(msg, prefix)
     }
 
     fn remove_prefix_internal(msg: &mut dyn MessageInfo, prefix: &[u8]) -> MessageHandlerResult {

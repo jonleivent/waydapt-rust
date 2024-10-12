@@ -118,7 +118,7 @@ pub(crate) fn get_server_stream() -> UnixStream {
 // Otherwise panic or quivalent (unwrap).  Everything in here should just panic:
 pub(crate) fn client_session(
     options: &'static SharedOptions, active_interfaces: &'static ActiveInterfaces,
-    session_handlers: &VecDeque<SessionInitHandler>, client_stream: UnixStream,
+    session_handlers: &VecDeque<(SessionInitHandler, usize)>, client_stream: UnixStream,
 ) {
     use crate::terminator::SessionTerminator;
     use rustix::net::sockopt::get_socket_peercred;
@@ -139,7 +139,7 @@ pub(crate) fn client_session(
     #[forbid(let_underscore_drop)]
     let _st = options.terminate_after.map(SessionTerminator::new);
 
-    session_handlers.iter().for_each(|h| h(&init_info));
+    session_handlers.iter().for_each(|(h, g)| h(&init_info, *g));
 
     let mut session = Session::new(&init_info, [&client_stream, &server_stream]);
 

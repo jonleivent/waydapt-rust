@@ -5,7 +5,7 @@ use crate::for_handlers::{AddHandler, ArgData, MessageHandlerResult, MessageInfo
 // also cannot allow any addons to alter or drop the resulting message, so we use Send or Drop
 // results only.
 fn wl_registry_global_handler(
-    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo,
+    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo, _: usize,
 ) -> MessageHandlerResult {
     // arg0 is the "name" of the global instance, really a uint
     let ArgData::String(interface_name) = msg.get_arg(1) else { unreachable!() };
@@ -29,7 +29,7 @@ fn wl_registry_global_handler(
 }
 
 fn wl_display_delete_id_handler(
-    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo,
+    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo, _: usize,
 ) -> MessageHandlerResult {
     let ArgData::Uint(id) = msg.get_arg(0) else { unreachable!() };
     // should we check if this is the wayland-idfix handshake initial message from the server?  If
@@ -45,7 +45,7 @@ fn wl_display_delete_id_handler(
 // uniquely weird new_id arg can be processed properly, and prevent any addon handlers because the
 // handler arg access won't work properly vs. the weird new_id arg.
 fn wl_registry_bind_handler(
-    _msg: &mut dyn MessageInfo, _session_info: &mut dyn SessionInfo,
+    _msg: &mut dyn MessageInfo, _session_info: &mut dyn SessionInfo, _: usize,
 ) -> MessageHandlerResult {
     // Nothing to do because it all got handled in the add_wl_registry_bind_new_id method.  However,
     // we don't want any addon handlers to muck up the works, so Send:

@@ -2,8 +2,8 @@
 #![allow(clippy::missing_panics_doc)]
 
 use crate::basics::NoDebug;
-use crate::for_handlers::MessageHandler;
-use std::collections::{HashMap, VecDeque};
+use crate::handlers::MsgHandlerQ;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{Result as IoResult, Write};
 pub use std::sync::OnceLock;
@@ -155,7 +155,7 @@ pub struct Message<'a> {
     pub(crate) owner: OnceLock<&'a Interface<'a>>,
     pub(crate) new_id_interface: OnceLock<&'a Interface<'a>>,
     pub(crate) active: OnceLock<()>, // acts like an atomic bool that can only go from inactive -> active
-    pub(crate) handlers: NoDebug<OnceLock<VecDeque<(&'static str, MessageHandler)>>>, // str is module name
+    pub(crate) handlers: NoDebug<OnceLock<MsgHandlerQ>>, // str is module name
     pub num_fds: u32,
     pub is_request: bool,
     pub(crate) special: OnceLock<SpecialMessage>,
@@ -232,13 +232,13 @@ impl<'a> Message<'a> {
         if let Some(handlers) = self.handlers.get() {
             write!(out, "h:[")?;
             let mut first = true;
-            for (modname, _) in handlers {
+            for (modname, _, group) in handlers {
                 if first {
                     first = false;
                 } else {
                     write!(out, ", ")?;
                 };
-                write!(out, "{modname}")?;
+                write!(out, "{modname}:{group}")?;
             }
             write!(out, "]")?;
         }

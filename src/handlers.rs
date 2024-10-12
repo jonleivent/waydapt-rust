@@ -15,7 +15,7 @@ use crate::{
     setup::IHMap,
 };
 
-pub(crate) type SessionHandlers = VecDeque<SessionInitHandler>;
+pub(crate) type SessionHandlers = VecDeque<(SessionInitHandler, usize)>;
 
 pub(crate) fn gather_handlers(
     all_args: &mut Args, init_handlers: &IHMap, active_interfaces: &'static ActiveInterfaces,
@@ -38,7 +38,9 @@ pub(crate) fn gather_handlers(
 type RInterface = &'static Interface<'static>;
 type RMessage = &'static Message<'static>;
 
-type HandlerMap = HashMap<&'static str, (RMessage, VecDeque<(&'static str, MessageHandler)>)>;
+pub(crate) type MsgHandlerQ = VecDeque<(&'static str, MessageHandler, usize)>;
+
+type HandlerMap = HashMap<&'static str, (RMessage, MsgHandlerQ)>;
 
 #[derive(Default)]
 struct InterfaceHandlers {
@@ -49,11 +51,7 @@ struct InterfaceHandlers {
 impl InterfaceHandlers {
     #[inline(always)]
     fn map<const IS_REQUEST: bool>(&mut self) -> &mut HandlerMap {
-        if IS_REQUEST {
-            &mut self.request_handlers
-        } else {
-            &mut self.event_handlers
-        }
+        if IS_REQUEST { &mut self.request_handlers } else { &mut self.event_handlers }
     }
 }
 
@@ -62,33 +60,22 @@ struct AllHandlers {
     session_handlers: &'static mut SessionHandlers,
     mod_name: &'static str,
     active_interfaces: &'static ActiveInterfaces,
+    addon_group: usize,
 }
 
 impl AddHandlerError {
     const fn no_such_msg<const IS_REQUEST: bool>() -> Self {
-        if IS_REQUEST {
-            Self::NoSuchRequest
-        } else {
-            Self::NoSuchEvent
-        }
+        if IS_REQUEST { Self::NoSuchRequest } else { Self::NoSuchEvent }
     }
 
     const fn inactive<const IS_REQUEST: bool>() -> Self {
-        if IS_REQUEST {
-            Self::InactiveRequest
-        } else {
-            Self::InactiveEvent
-        }
+        if IS_REQUEST { Self::InactiveRequest } else { Self::InactiveEvent }
     }
 }
 
 impl<'a> Interface<'a> {
     fn get_msg_by_name<const IS_REQUEST: bool>(&self, name: &str) -> Option<&Message<'a>> {
-        if IS_REQUEST {
-            self.get_request_by_name(name)
-        } else {
-            self.get_event_by_name(name)
-        }
+        if IS_REQUEST { self.get_request_by_name(name) } else { self.get_event_by_name(name) }
     }
 }
 
@@ -101,6 +88,7 @@ impl AllHandlers {
             session_handlers: Leaker.alloc(Default::default()),
             mod_name: "",
             active_interfaces,
+            addon_group: 0,
         }
     }
 
@@ -109,6 +97,7 @@ impl AllHandlers {
         // line so that they can add their addon handlers.  The remainder of all_args will be name
         // args -- name args -- ...., so we need to break it up into portions using take_while.
         let active_interfaces = self.active_interfaces;
+        self.addon_group = 0;
         loop {
             let Some(handler_mod_name) = all_args.next() else { break };
             let handler_mod_name = Leaker.alloc(handler_mod_name).as_str();
@@ -118,7 +107,9 @@ impl AllHandlers {
             // this init handler gets the next sequence of args up to the next --
             let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
             self.mod_name = handler_mod_name;
-            handler_init(&handler_args, self, active_interfaces);
+            let group = self.addon_group;
+            handler_init(&handler_args, self, active_interfaces, group);
+            self.addon_group += 1;
         }
     }
 
@@ -137,7 +128,7 @@ impl AllHandlers {
     // get the handler queue for a specific interface/message by names
     fn get_handlers<const IS_REQUEST: bool>(
         &mut self, iface_name: &'static str, msg_name: &'static str,
-    ) -> Result<&mut VecDeque<(&'static str, MessageHandler)>, AddHandlerError> {
+    ) -> Result<&mut MsgHandlerQ, AddHandlerError> {
         use std::collections::hash_map::Entry;
         let ientry = self.message_handlers.entry(iface_name);
         let (interface, iface_handlers) = match ientry {
@@ -172,8 +163,9 @@ impl AddHandler for AllHandlers {
         handler: MessageHandler,
     ) -> Result<(), AddHandlerError> {
         let mod_name = self.mod_name;
+        let group = self.addon_group;
         let handlers = self.get_handlers::<true>(interface_name, request_name)?;
-        handlers.push_front((mod_name, handler));
+        handlers.push_front((mod_name, handler, group));
         Ok(())
     }
     fn request_push_back(
@@ -181,30 +173,35 @@ impl AddHandler for AllHandlers {
         handler: MessageHandler,
     ) -> Result<(), AddHandlerError> {
         let mod_name = self.mod_name;
+        let group = self.addon_group;
         let handlers = self.get_handlers::<true>(interface_name, request_name)?;
-        handlers.push_back((mod_name, handler));
+        handlers.push_back((mod_name, handler, group));
         Ok(())
     }
     fn event_push_front(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
     ) -> Result<(), AddHandlerError> {
         let mod_name = self.mod_name;
+        let group = self.addon_group;
         let handlers = self.get_handlers::<false>(interface_name, event_name)?;
-        handlers.push_front((mod_name, handler));
+        handlers.push_front((mod_name, handler, group));
         Ok(())
     }
     fn event_push_back(
         &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
     ) -> Result<(), AddHandlerError> {
         let mod_name = self.mod_name;
+        let group = self.addon_group;
         let handlers = self.get_handlers::<false>(interface_name, event_name)?;
-        handlers.push_back((mod_name, handler));
+        handlers.push_back((mod_name, handler, group));
         Ok(())
     }
     fn session_push_front(&mut self, handler: SessionInitHandler) {
-        self.session_handlers.push_front(handler);
+        let group = self.addon_group;
+        self.session_handlers.push_front((handler, group));
     }
     fn session_push_back(&mut self, handler: SessionInitHandler) {
-        self.session_handlers.push_back(handler);
+        let group = self.addon_group;
+        self.session_handlers.push_back((handler, group));
     }
 }

@@ -20,14 +20,10 @@ use std::os::unix::io::OwnedFd;
 // TBD: where should this go?
 impl FdInput for VecDeque<OwnedFd> {
     #[inline(always)]
-    fn try_take_fd(&mut self) -> Option<OwnedFd> {
-        self.pop_front()
-    }
+    fn try_take_fd(&mut self) -> Option<OwnedFd> { self.pop_front() }
 
     #[inline(always)]
-    fn drain(&mut self, num: usize) -> impl Iterator<Item = OwnedFd> {
-        self.drain(..num)
-    }
+    fn drain(&mut self, num: usize) -> impl Iterator<Item = OwnedFd> { self.drain(..num) }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -40,9 +36,7 @@ pub(crate) struct Mediator<'a, S: SessionInitInfo> {
 
 impl<'a, S: SessionInitInfo> SessionInitInfo for Mediator<'a, S> {
     #[inline(always)]
-    fn ucred(&self) -> Option<rustix::net::UCred> {
-        self.init_info.ucred()
-    }
+    fn ucred(&self) -> Option<rustix::net::UCred> { self.init_info.ucred() }
 
     #[inline(always)]
     fn get_active_interfaces(&self) -> &'static ActiveInterfaces {
@@ -50,36 +44,24 @@ impl<'a, S: SessionInitInfo> SessionInitInfo for Mediator<'a, S> {
     }
 
     #[inline(always)]
-    fn get_display(&self) -> RInterface {
-        self.init_info.get_display()
-    }
+    fn get_display(&self) -> RInterface { self.init_info.get_display() }
 
     #[inline(always)]
-    fn get_debug_level(&self) -> u32 {
-        self.init_info.get_debug_level()
-    }
+    fn get_debug_level(&self) -> u32 { self.init_info.get_debug_level() }
 }
 
 impl<'a, S: SessionInitInfo> SessionInfo for Mediator<'a, S> {
     #[inline(always)]
-    fn try_lookup(&self, id: u32) -> Option<RInterface> {
-        self.id_map.try_lookup(id)
-    }
+    fn try_lookup(&self, id: u32) -> Option<RInterface> { self.id_map.try_lookup(id) }
 
     #[inline(always)]
-    fn lookup(&self, id: u32) -> RInterface {
-        self.id_map.lookup(id)
-    }
+    fn lookup(&self, id: u32) -> RInterface { self.id_map.lookup(id) }
 
     #[inline(always)]
-    fn add(&mut self, id: u32, interface: RInterface) {
-        self.id_map.add(id, interface);
-    }
+    fn add(&mut self, id: u32, interface: RInterface) { self.id_map.add(id, interface); }
 
     #[inline(always)]
-    fn delete(&mut self, id: u32) {
-        self.id_map.delete(id);
-    }
+    fn delete(&mut self, id: u32) { self.id_map.delete(id); }
 }
 
 impl<'a, S: SessionInitInfo> Mediator<'a, S> {
@@ -103,9 +85,9 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
             let mut dmsg = DemarshalledMessage::new(header, msg_decl, in_msg);
             dmsg.demarshal(in_fds, self);
             self.debug_in(header, msg_decl, &dmsg, from_server);
-            for (mod_name, h) in handlers {
+            for (mod_name, h, group) in handlers {
                 // since we have the mod name, we can debug each h call along with their result - TBD
-                match h(&mut dmsg, self) {
+                match h(&mut dmsg, self, *group) {
                     Next => continue,
                     Send => break,
                     Drop => {
