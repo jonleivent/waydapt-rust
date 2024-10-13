@@ -48,18 +48,23 @@ mod safeclip {
     use std::{
         borrow::Cow,
         ffi::{CStr, CString},
-        sync::RwLock,
+        sync::Mutex,
+        sync::OnceLock,
     };
 
     use crate::for_handlers::{
         ActiveInterfaces, AddHandler, ArgData, Message, MessageHandlerResult, MessageInfo,
-        SessionInfo, Type, MAX_BYTES_OUT,
+        SessionInfo, SessionInitInfo, Type, MAX_BYTES_OUT,
     };
 
     use super::InitHandlersFun;
 
     // a vector, indexed by group number, of byte vectors:
-    static PREFIX: RwLock<Vec<Vec<u8>>> = RwLock::new(Vec::new());
+    static PREFIX_INIT: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+    // initialized from PREFIX_INIT by the first session's first group's init handler - used instead
+    // so that we can avoid the Mutex cost, once it becomes read-only.
+    static PREFIX: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
 
     #[inline]
     fn has_mime_type_arg(msg: &Message<'_>) -> bool {
@@ -110,16 +115,16 @@ mod safeclip {
         assert_eq!(args.len(), 1);
         let prefix = args[0].as_bytes().into();
         {
-            let mut v = PREFIX.write().unwrap();
+            let mut v = PREFIX_INIT.lock().unwrap();
             if v.len() <= group {
                 v.resize_with(group + 1, Vec::new);
             }
             v[group] = prefix;
         }
 
-        // We do not need a session init handler, because there is no per-session state
-
         check_known_mime_type_msgs(active_interfaces);
+
+        adder.session_push_back(session_init);
 
         for iface in active_interfaces.iter() {
             let iname = &iface.name.as_str();
@@ -146,12 +151,25 @@ mod safeclip {
 
     pub(super) const INIT_HANDLER: InitHandlersFun = init_handler;
 
+    fn drain_prefix_init() -> Vec<Vec<u8>> {
+        let mut prefix_init = PREFIX_INIT.lock().unwrap();
+        let mut prefix = Vec::new();
+        std::mem::swap(&mut prefix, &mut prefix_init);
+        prefix
+    }
+
+    fn session_init(_: &dyn SessionInitInfo, _: usize) {
+        // This will transfer PREFIX_INIT to PREFIX the first time it is called, and be a no-op
+        // after that
+        PREFIX.get_or_init(drain_prefix_init);
+    }
+
     fn add_prefix(
         msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo, group: usize,
     ) -> MessageHandlerResult {
         // separate access of PREFIX for testing purposes, so that the tests do not need to modify
         // PREFIX:
-        let guard = PREFIX.read().unwrap();
+        let guard = PREFIX.get().unwrap();
         let prefix = &guard[group];
         add_prefix_internal(msg, prefix)
     }
@@ -196,7 +214,7 @@ mod safeclip {
     ) -> MessageHandlerResult {
         // separate access of PREFIX for testing purposes, so that the tests do not need to modify
         // PREFIX:
-        let guard = PREFIX.read().unwrap();
+        let guard = PREFIX.get().unwrap();
         let prefix = &guard[group];
         remove_prefix_internal(msg, prefix)
     }
