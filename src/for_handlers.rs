@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::any::Any;
+
 pub use crate::basics::MAX_BYTES_OUT;
 pub use crate::message::ArgData;
 pub use crate::postparse::ActiveInterfaces;
@@ -39,11 +41,48 @@ pub enum MessageHandlerResult {
     Drop,
 }
 
-// The usize final args are for the addon group (starting from 0 on the command line)
-pub type MessageHandler =
-    fn(&mut dyn MessageInfo, &mut dyn SessionInfo, usize) -> MessageHandlerResult;
+// There is one InitHandlersFun per addon, and it is called once per group for that addon:
+pub type InitHandlersFun = fn(
+    &[String],
+    &mut dyn AddHandler,
+    &'static ActiveInterfaces,
+) -> &'static dyn SessionInitHandler;
 
-pub type SessionInitHandler = fn(&dyn SessionInitInfo, usize);
+pub type SessionState = dyn Any;
+
+pub trait SessionInitHandler: Sync {
+    fn init(&self, session_init_info: &dyn SessionInitInfo) -> Box<SessionState>;
+}
+
+impl SessionInitHandler for () {
+    fn init(&self, _: &dyn SessionInitInfo) -> Box<SessionState> { Box::new(()) }
+}
+
+// If you want to implement SessionInitHandler as a fun/closure instead:
+impl<T: Sync> SessionInitHandler for T
+where T: Fn(&dyn SessionInitInfo) -> Box<SessionState>
+{
+    fn init(&self, session_init_info: &dyn SessionInitInfo) -> Box<SessionState> {
+        self(session_init_info)
+    }
+}
+
+pub trait MessageHandler: Sync {
+    fn handle(
+        &self, mi: &mut dyn MessageInfo, si: &mut dyn SessionInfo, ss: &mut SessionState,
+    ) -> MessageHandlerResult;
+}
+
+// If you want to implement MessageHandler as a fun/closure instead:
+impl<T: Sync> MessageHandler for T
+where T: Fn(&mut dyn MessageInfo, &mut dyn SessionInfo, &mut SessionState) -> MessageHandlerResult
+{
+    fn handle(
+        &self, mi: &mut dyn MessageInfo, si: &mut dyn SessionInfo, ss: &mut SessionState,
+    ) -> MessageHandlerResult {
+        self(mi, si, ss)
+    }
+}
 
 #[derive(Debug)]
 pub enum AddHandlerError {
@@ -58,22 +97,19 @@ pub trait AddHandler {
     #![allow(clippy::missing_errors_doc)]
     fn request_push_front(
         &mut self, interface_name: &'static str, request_name: &'static str,
-        handler: MessageHandler,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError>;
     fn request_push_back(
         &mut self, interface_name: &'static str, request_name: &'static str,
-        handler: MessageHandler,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError>;
 
     fn event_push_front(
-        &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
+        &mut self, interface_name: &'static str, event_name: &'static str,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError>;
     fn event_push_back(
-        &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
+        &mut self, interface_name: &'static str, event_name: &'static str,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError>;
-
-    fn session_push_front(&mut self, handler: SessionInitHandler);
-    fn session_push_back(&mut self, handler: SessionInitHandler);
 }
-
-pub type InitHandlersFun = fn(&[String], &mut dyn AddHandler, &'static ActiveInterfaces, usize);

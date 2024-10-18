@@ -90,7 +90,7 @@ pub(crate) fn startup() {
 
 fn listen(
     matches: &Matches, options: &'static SharedOptions, interfaces: &'static ActiveInterfaces,
-    handlers: &'static SessionHandlers,
+    handlers: SessionHandlers,
 ) -> IoResult<UnixStream> {
     // Group the listener and event handler here so that they are both dropped in the -c|-s cases
     // before we start the client_session:
@@ -184,7 +184,7 @@ fn protocol_file_iter<'a>(
 
 fn globals_and_handlers(
     matches: &Matches, all_args: &mut Args, init_handlers: &IHMap,
-) -> (&'static ActiveInterfaces, &'static SessionHandlers) {
+) -> (&'static ActiveInterfaces, SessionHandlers) {
     let protocol_files = matches.opt_strs("p");
     let protocol_dirs = matches.opt_strs("P");
     let all_protocol_files = protocol_file_iter(&protocol_files, &protocol_dirs);

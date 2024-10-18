@@ -48,23 +48,14 @@ mod safeclip {
     use std::{
         borrow::Cow,
         ffi::{CStr, CString},
-        sync::Mutex,
-        sync::OnceLock,
     };
 
     use crate::for_handlers::{
         ActiveInterfaces, AddHandler, ArgData, Message, MessageHandlerResult, MessageInfo,
-        SessionInfo, SessionInitInfo, Type, MAX_BYTES_OUT,
+        SessionInfo, SessionInitHandler, SessionInitInfo, SessionState, Type, MAX_BYTES_OUT,
     };
 
     use super::InitHandlersFun;
-
-    // a vector, indexed by group number, of byte vectors:
-    static PREFIX_INIT: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-
-    // initialized from PREFIX_INIT by the first session's first group's init handler - used instead
-    // so that we can avoid the Mutex cost, once it becomes read-only.
-    static PREFIX: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
 
     #[inline]
     fn has_mime_type_arg(msg: &Message<'_>) -> bool {
@@ -107,34 +98,31 @@ mod safeclip {
         }
     }
 
+    struct SessionInitPrefix(&'static String);
+
+    impl SessionInitHandler for SessionInitPrefix {
+        fn init(&self, _: &dyn SessionInitInfo) -> Box<SessionState> { Box::new(self.0) }
+    }
+
     fn init_handler(
         args: &[String], adder: &mut dyn AddHandler, active_interfaces: &'static ActiveInterfaces,
-        group: usize,
-    ) {
+    ) -> &'static dyn SessionInitHandler {
         // Unlike the C waydapt, the 0th arg is NOT the dll name, it is our first arg.
         assert_eq!(args.len(), 1);
-        let prefix = args[0].as_bytes().into();
-        {
-            let mut v = PREFIX_INIT.lock().unwrap();
-            if v.len() <= group {
-                v.resize_with(group + 1, Vec::new);
-            }
-            v[group] = prefix;
-        }
+        let prefix = Box::leak(Box::new(args[0].clone()));
 
         check_known_mime_type_msgs(active_interfaces);
 
-        adder.session_push_back(session_init);
-
         for iface in active_interfaces.iter() {
             let iname = &iface.name.as_str();
-            // Add the add_prefix handler to any request named "set_title" or any that has a mime_type arg
+            // Add the add_prefix handler to any request named "set_title" or any that has a
+            // mime_type arg
             for &request in &iface.requests {
                 if !request.is_active() {
                     continue;
                 };
                 if request.name == "set_title" || has_mime_type_arg(request) {
-                    adder.request_push_back(iname, &request.name, add_prefix).unwrap();
+                    adder.request_push_back(iname, &request.name, &add_prefix).unwrap();
                 }
             }
             // Add the remove_prefix handler to any event that has a mime_type arg
@@ -143,35 +131,22 @@ mod safeclip {
                     continue;
                 };
                 if has_mime_type_arg(event) {
-                    adder.event_push_front(iname, &event.name, remove_prefix).unwrap();
+                    adder.event_push_front(iname, &event.name, &remove_prefix).unwrap();
                 }
             }
         }
+
+        let f = Box::leak(Box::new(SessionInitPrefix(prefix)));
+        f
     }
 
     pub(super) const INIT_HANDLER: InitHandlersFun = init_handler;
 
-    fn drain_prefix_init() -> Vec<Vec<u8>> {
-        let mut prefix_init = PREFIX_INIT.lock().unwrap();
-        let mut prefix = Vec::new();
-        std::mem::swap(&mut prefix, &mut prefix_init);
-        prefix
-    }
-
-    fn session_init(_: &dyn SessionInitInfo, _: usize) {
-        // This will transfer PREFIX_INIT to PREFIX the first time it is called, and be a no-op
-        // after that
-        PREFIX.get_or_init(drain_prefix_init);
-    }
-
     fn add_prefix(
-        msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo, group: usize,
+        msg: &mut dyn MessageInfo, _: &mut dyn SessionInfo, state: &mut SessionState,
     ) -> MessageHandlerResult {
-        // separate access of PREFIX for testing purposes, so that the tests do not need to modify
-        // PREFIX:
-        let guard = PREFIX.get().unwrap();
-        let prefix = &guard[group];
-        add_prefix_internal(msg, prefix)
+        let prefix: &String = state.downcast_ref().unwrap();
+        add_prefix_internal(msg, prefix.as_bytes())
     }
 
     fn add_prefix_internal(msg: &mut dyn MessageInfo, prefix: &[u8]) -> MessageHandlerResult {
@@ -210,13 +185,10 @@ mod safeclip {
     }
 
     fn remove_prefix(
-        msg: &mut dyn MessageInfo, _si: &mut dyn SessionInfo, group: usize,
+        msg: &mut dyn MessageInfo, _: &mut dyn SessionInfo, state: &mut SessionState,
     ) -> MessageHandlerResult {
-        // separate access of PREFIX for testing purposes, so that the tests do not need to modify
-        // PREFIX:
-        let guard = PREFIX.get().unwrap();
-        let prefix = &guard[group];
-        remove_prefix_internal(msg, prefix)
+        let prefix: &String = state.downcast_ref().unwrap();
+        remove_prefix_internal(msg, prefix.as_bytes())
     }
 
     fn remove_prefix_internal(msg: &mut dyn MessageInfo, prefix: &[u8]) -> MessageHandlerResult {
@@ -233,8 +205,8 @@ mod safeclip {
                     *s = &s[plen..]; // O(1) move, no copy
                     return MessageHandlerResult::Next;
                 }
-                // Not worth optimizing this case - it would only happen if we have a previous handler
-                // modifying this same string arg:
+                // Not worth optimizing this case - it would only happen if we have a previous
+                // handler modifying this same string arg:
                 ArgData::String(Cow::Owned(s)) if prefixed(prefix, s) => {
                     *s = s[..][plen..].into(); // O(N) copy
                     return MessageHandlerResult::Next;
@@ -261,8 +233,8 @@ mod safeclip {
         };
 
         use super::*;
-        // TBD: Test how add_prefix works when the msg would become too long with the added prefix.  Use
-        // a msg with a mime_type or title string arg and another arg that is a very long array.
+        // TBD: Test how add_prefix works when the msg would become too long with the added prefix.
+        // Use a msg with a mime_type or title string arg and another arg that is a very long array.
 
         struct FakeSessionInfo(Vec<(u32, RInterface)>);
 
@@ -347,3 +319,8 @@ mod safeclip {
 
 // TBD: maybe add another addon module that is just for testing.  This would allow us to test
 // session init handlers, which safeclip doesn't use.
+
+// Do we really need session init handlers?  Each addon could have a thread_local static LazyCell.
+// The issue would be that in multi-thread mode, one thread might block the other while initing the
+// LazyCell.  Also, it might be useful for certain addons to do some session initialization before
+// any messages are sent, especially when we add origination.

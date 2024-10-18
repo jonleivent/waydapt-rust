@@ -232,13 +232,13 @@ impl<'a> Message<'a> {
         if let Some(handlers) = self.handlers.get() {
             write!(out, "h:[")?;
             let mut first = true;
-            for (modname, _, group) in handlers {
+            for (_, group) in handlers {
                 if first {
                     first = false;
                 } else {
                     write!(out, ", ")?;
                 };
-                write!(out, "{modname}:{group}")?;
+                write!(out, "{group}")?;
             }
             write!(out, "]")?;
         }

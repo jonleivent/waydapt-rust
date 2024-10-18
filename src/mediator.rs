@@ -11,6 +11,7 @@ use crate::map::{IdMap, WL_SERVER_ID_START};
 use crate::message::DemarshalledMessage;
 use crate::postparse::ActiveInterfaces;
 use crate::protocol::{Message, SpecialMessage, Type};
+use std::any::Any;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::OwnedFd;
@@ -74,6 +75,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
 
     pub(crate) fn mediate(
         &mut self, index: usize, in_msg: &[u32], in_fds: &mut impl FdInput, out: &mut OutBuffer,
+        group_states: &mut [(String, Box<dyn Any>)],
     ) -> IoResult<()> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;
@@ -85,9 +87,10 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
             let mut dmsg = DemarshalledMessage::new(header, msg_decl, in_msg);
             dmsg.demarshal(in_fds, self);
             self.debug_in(header, msg_decl, &dmsg, from_server);
-            for (mod_name, h, group) in handlers {
+            for (h, group) in handlers {
                 // since we have the mod name, we can debug each h call along with their result - TBD
-                match h(&mut dmsg, self, *group) {
+                let (ref mod_name, gs) = &mut group_states[*group];
+                match h.handle(&mut dmsg, self, gs) {
                     Next => continue,
                     Send => break,
                     Drop => {
@@ -96,7 +99,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
                         // ranges.
                         assert!(
                             msg_decl.new_id_interface.get().is_none(),
-                            "Attempt to drop {msg_decl}, which has a new_id arg"
+                            "{mod_name}:{group} Attempt to drop {msg_decl}, which has a new_id arg"
                         );
                         if let Some(
                             SpecialMessage::WlRegistryBind
@@ -104,9 +107,11 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
                             | SpecialMessage::WlDisplayDeleteId,
                         ) = msg_decl.special.get()
                         {
-                            panic!("Attempt to drop {msg_decl}, which is a required message")
+                            panic!(
+                                "{mod_name}:{group} Attempt to drop {msg_decl}, which is a required message"
+                            )
                         };
-                        self.debug_drop(header, msg_decl, from_server, mod_name);
+                        self.debug_drop(header, msg_decl, from_server, mod_name, *group);
                         return Ok(());
                     }
                 }
@@ -252,14 +257,15 @@ mod debug {
         }
 
         pub(super) fn debug_drop(
-            &self, header: MessageHeader, msg_decl: &Message, from_server: bool, mod_name: &str,
+            &self, header: MessageHeader, msg_decl: &Message, from_server: bool, name: &str,
+            group: usize,
         ) {
             if self.init_info.get_debug_level() != 0 {
                 debug_print(
                     header,
                     msg_decl,
                     || self.eprint_flow_out(from_server),
-                    || eprint!("dropped by {mod_name}!"),
+                    || eprint!("dropped by group {name}:{group}!"),
                 );
             }
         }

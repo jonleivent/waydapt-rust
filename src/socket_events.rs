@@ -1,5 +1,5 @@
 use crate::crate_traits::EventHandler;
-use crate::for_handlers::SessionInitHandler;
+use crate::handlers::SessionHandlers;
 use crate::listener::SocketListener;
 use crate::postparse::ActiveInterfaces;
 use crate::session::client_session;
@@ -8,7 +8,6 @@ use nix::sys::signal;
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use rustix::event::epoll::EventFlags;
 use signal::{SigSet, Signal};
-use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result as IoResult};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -19,14 +18,13 @@ pub(crate) struct SocketEventHandler {
     server_stream: Option<UnixStream>,
     options: &'static SharedOptions,
     interfaces: &'static ActiveInterfaces,
-    handlers: &'static VecDeque<(SessionInitHandler, usize)>,
+    handlers: SessionHandlers,
 }
 
 impl SocketEventHandler {
     pub(crate) fn new(
         listener: SocketListener, options: &'static SharedOptions,
-        interfaces: &'static ActiveInterfaces,
-        handlers: &'static VecDeque<(SessionInitHandler, usize)>,
+        interfaces: &'static ActiveInterfaces, handlers: SessionHandlers,
     ) -> Self {
         // Mask and handle these signals:
         let mut mask = SigSet::empty();
@@ -100,7 +98,9 @@ impl SocketEventHandler {
 }
 
 impl Drop for SocketEventHandler {
-    fn drop(&mut self) { let _ = SigSet::all().thread_unblock(); }
+    fn drop(&mut self) {
+        let _ = SigSet::all().thread_unblock();
+    }
 }
 
 impl EventHandler for SocketEventHandler {

@@ -15,11 +15,11 @@ use crate::{
     setup::IHMap,
 };
 
-pub(crate) type SessionHandlers = VecDeque<(SessionInitHandler, usize)>;
+pub(crate) type SessionHandlers = &'static Vec<(String, &'static dyn SessionInitHandler)>;
 
 pub(crate) fn gather_handlers(
     all_args: &mut Args, init_handlers: &IHMap, active_interfaces: &'static ActiveInterfaces,
-) -> &'static SessionHandlers {
+) -> SessionHandlers {
     let mut all_handlers = AllHandlers::new(active_interfaces);
 
     // add addon session and message handlers based on what's left in all_args iterator
@@ -28,7 +28,7 @@ pub(crate) fn gather_handlers(
     // By adding the builtin handlers last, we give them the ability to prevent addon handlers (by
     // using push_front and MessageHandlerResult::Send or Drop), or allow them (by using push_back
     // or push_front and Next):
-    all_handlers.mod_name = "<builtin>";
+    all_handlers.session_handlers.push(("<builtin>".into(), &())); // everyone needs one of these, even builtins
     crate::builtin::add_builtin_handlers(&mut all_handlers);
 
     all_handlers.link_with_messages();
@@ -38,7 +38,7 @@ pub(crate) fn gather_handlers(
 type RInterface = &'static Interface<'static>;
 type RMessage = &'static Message<'static>;
 
-pub(crate) type MsgHandlerQ = VecDeque<(&'static str, MessageHandler, usize)>;
+pub(crate) type MsgHandlerQ = VecDeque<(&'static dyn MessageHandler, usize)>;
 
 type HandlerMap = HashMap<&'static str, (RMessage, MsgHandlerQ)>;
 
@@ -57,10 +57,9 @@ impl InterfaceHandlers {
 
 struct AllHandlers {
     message_handlers: HashMap<&'static str, (RInterface, InterfaceHandlers)>,
-    session_handlers: &'static mut SessionHandlers,
-    mod_name: &'static str,
+    session_handlers: &'static mut Vec<(String, &'static dyn SessionInitHandler)>, // indexed by group
     active_interfaces: &'static ActiveInterfaces,
-    addon_group: usize,
+    current_group: usize,
 }
 
 impl AddHandlerError {
@@ -86,9 +85,8 @@ impl AllHandlers {
         Self {
             message_handlers: Default::default(),
             session_handlers: Leaker.alloc(Default::default()),
-            mod_name: "",
             active_interfaces,
-            addon_group: 0,
+            current_group: 0,
         }
     }
 
@@ -97,19 +95,16 @@ impl AllHandlers {
         // line so that they can add their addon handlers.  The remainder of all_args will be name
         // args -- name args -- ...., so we need to break it up into portions using take_while.
         let active_interfaces = self.active_interfaces;
-        self.addon_group = 0;
-        loop {
+        for group in 0.. {
+            self.current_group = group;
             let Some(handler_mod_name) = all_args.next() else { break };
-            let handler_mod_name = Leaker.alloc(handler_mod_name).as_str();
-            let Some(handler_init) = init_handlers.get(handler_mod_name) else {
+            let Some(handler_init) = init_handlers.get(&handler_mod_name[..]) else {
                 panic!("{handler_mod_name} does not have a handler init function");
             };
             // this init handler gets the next sequence of args up to the next --
             let handler_args = all_args.take_while(|a| a != "--").collect::<Vec<_>>();
-            self.mod_name = handler_mod_name;
-            let group = self.addon_group;
-            handler_init(&handler_args, self, active_interfaces, group);
-            self.addon_group += 1;
+            let s = handler_init(&handler_args, self, active_interfaces);
+            self.session_handlers.push((handler_mod_name, s));
         }
     }
 
@@ -117,10 +112,10 @@ impl AllHandlers {
         // Set the Message.handlers fields
         for (_, (_interface, mut interface_handlers)) in self.message_handlers.drain() {
             for (_, (request, request_handlers)) in interface_handlers.request_handlers.drain() {
-                request.handlers.set(request_handlers).expect("should only be set once");
+                assert!(request.handlers.set(request_handlers).is_ok(), "should only be set once");
             }
             for (_, (event, event_handlers)) in interface_handlers.event_handlers.drain() {
-                event.handlers.set(event_handlers).expect("should only be set once");
+                assert!(event.handlers.set(event_handlers).is_ok(), "should only be set once");
             }
         }
     }
@@ -160,48 +155,38 @@ impl AllHandlers {
 impl AddHandler for AllHandlers {
     fn request_push_front(
         &mut self, interface_name: &'static str, request_name: &'static str,
-        handler: MessageHandler,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError> {
-        let mod_name = self.mod_name;
-        let group = self.addon_group;
+        let group = self.current_group;
         let handlers = self.get_handlers::<true>(interface_name, request_name)?;
-        handlers.push_front((mod_name, handler, group));
+        handlers.push_front((handler, group));
         Ok(())
     }
     fn request_push_back(
         &mut self, interface_name: &'static str, request_name: &'static str,
-        handler: MessageHandler,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError> {
-        let mod_name = self.mod_name;
-        let group = self.addon_group;
+        let group = self.current_group;
         let handlers = self.get_handlers::<true>(interface_name, request_name)?;
-        handlers.push_back((mod_name, handler, group));
+        handlers.push_back((handler, group));
         Ok(())
     }
     fn event_push_front(
-        &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
+        &mut self, interface_name: &'static str, event_name: &'static str,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError> {
-        let mod_name = self.mod_name;
-        let group = self.addon_group;
+        let group = self.current_group;
         let handlers = self.get_handlers::<false>(interface_name, event_name)?;
-        handlers.push_front((mod_name, handler, group));
+        handlers.push_front((handler, group));
         Ok(())
     }
     fn event_push_back(
-        &mut self, interface_name: &'static str, event_name: &'static str, handler: MessageHandler,
+        &mut self, interface_name: &'static str, event_name: &'static str,
+        handler: &'static dyn MessageHandler,
     ) -> Result<(), AddHandlerError> {
-        let mod_name = self.mod_name;
-        let group = self.addon_group;
+        let group = self.current_group;
         let handlers = self.get_handlers::<false>(interface_name, event_name)?;
-        handlers.push_back((mod_name, handler, group));
+        handlers.push_back((handler, group));
         Ok(())
-    }
-    fn session_push_front(&mut self, handler: SessionInitHandler) {
-        let group = self.addon_group;
-        self.session_handlers.push_front((handler, group));
-    }
-    fn session_push_back(&mut self, handler: SessionInitHandler) {
-        let group = self.addon_group;
-        self.session_handlers.push_back((handler, group));
     }
 }

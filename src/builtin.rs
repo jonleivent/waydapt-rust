@@ -1,11 +1,13 @@
-use crate::for_handlers::{AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo};
+use crate::for_handlers::{
+    AddHandler, ArgData, MessageHandlerResult, MessageInfo, SessionInfo, SessionState,
+};
 
 // We must alter wl_registry::global events in order to either drop or version-limit the global
 // objects based on protocol that this waydapt can understand (dictated by the globals file).  We
 // also cannot allow any addons to alter or drop the resulting message, so we use Send or Drop
 // results only.
 fn wl_registry_global_handler(
-    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo, _: usize,
+    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo, _: &mut SessionState,
 ) -> MessageHandlerResult {
     // arg0 is the "name" of the global instance, really a uint
     let ArgData::String(interface_name) = msg.get_arg(1) else { unreachable!() };
@@ -29,7 +31,7 @@ fn wl_registry_global_handler(
 }
 
 fn wl_display_delete_id_handler(
-    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo, _: usize,
+    msg: &mut dyn MessageInfo, session_info: &mut dyn SessionInfo, _: &mut SessionState,
 ) -> MessageHandlerResult {
     let ArgData::Uint(id) = msg.get_arg(0) else { unreachable!() };
     // should we check if this is the wayland-idfix handshake initial message from the server?  If
@@ -45,7 +47,7 @@ fn wl_display_delete_id_handler(
 // uniquely weird new_id arg can be processed properly, and prevent any addon handlers because the
 // handler arg access won't work properly vs. the weird new_id arg.
 fn wl_registry_bind_handler(
-    _msg: &mut dyn MessageInfo, _session_info: &mut dyn SessionInfo, _: usize,
+    _msg: &mut dyn MessageInfo, _session_info: &mut dyn SessionInfo, _: &mut SessionState,
 ) -> MessageHandlerResult {
     // Nothing to do because it all got handled in the add_wl_registry_bind_new_id method.  However,
     // we don't want any addon handlers to muck up the works, so Send:
@@ -56,8 +58,8 @@ fn wl_registry_bind_handler(
 // or always run last (push_back):
 pub(crate) fn add_builtin_handlers(adder: &mut dyn AddHandler) {
     // The wl_registry builtins must override any addon handlers, so put them at the front:
-    adder.event_push_front("wl_registry", "global", wl_registry_global_handler).unwrap();
-    adder.request_push_front("wl_registry", "bind", wl_registry_bind_handler).unwrap();
+    adder.event_push_front("wl_registry", "global", &wl_registry_global_handler).unwrap();
+    adder.request_push_front("wl_registry", "bind", &wl_registry_bind_handler).unwrap();
     // wl_display::delete_id builtin can run last after any addon handlers:
-    adder.event_push_back("wl_display", "delete_id", wl_display_delete_id_handler).unwrap();
+    adder.event_push_back("wl_display", "delete_id", &wl_display_delete_id_handler).unwrap();
 }
