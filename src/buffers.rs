@@ -1,7 +1,7 @@
 use crate::basics::{MAX_ARGS, MAX_FDS_OUT, MAX_WORDS_OUT};
 use crate::crate_traits::Messenger;
-use crate::header::{get_msg_nwords, MessageHeader};
-use crate::streams::{recv_msg, send_msg, IOStream};
+use crate::header::{MessageHeader, get_msg_nwords};
+use crate::streams::{IOStream, recv_msg, send_msg};
 use arrayvec::ArrayVec;
 use rustix::fd::BorrowedFd;
 #[cfg(not(feature = "no_linked_list"))]
@@ -309,7 +309,7 @@ impl<'a> OutBuffer<'a> {
     }
 }
 
-impl<'a> Messenger for OutBuffer<'a> {
+impl Messenger for OutBuffer<'_> {
     // Allow a closure (msgfun) to marshal the message into this OutBuffer using an ExtendChunk for
     // each arg of th message, and returning the MessageSender for us to fix up (fix the size field)
     // and marshal.
@@ -402,7 +402,7 @@ impl<'a> Messenger for OutBuffer<'a> {
 // dyn Trait just for this.  And we will only ever need one implementation in terms of Chunk.
 pub(crate) struct ExtendChunk<'a>(pub(self) &'a mut Chunk);
 
-impl<'a> ExtendChunk<'a> {
+impl ExtendChunk<'_> {
     #![allow(clippy::inline_always)]
     #![allow(unsafe_code)]
 

@@ -27,7 +27,7 @@ impl<'a> Protocol<'a> {
     pub fn is_active(&self) -> bool { self.active.get().is_some() }
 }
 
-impl<'a> fmt::Display for Protocol<'a> {
+impl fmt::Display for Protocol<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "protocol {}", self.name)
@@ -49,7 +49,7 @@ pub struct Interface<'a> {
 // msgs before all inactive msgs.  But taking advantage of this fact would require making those
 // vectors have interior mutability so that we could truncate them.
 
-impl<'a> fmt::Display for Interface<'a> {
+impl fmt::Display for Interface<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         if let Some(&owning_protocol) = self.owner.get() {
             write!(f, "interface {} in {}", self.name, owning_protocol)
@@ -246,7 +246,7 @@ impl<'a> Message<'a> {
     }
 }
 
-impl<'a> fmt::Display for Message<'a> {
+impl fmt::Display for Message<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         if let Some(&owning_interface) = self.owner.get() {
             write!(f, "message {} in {}", self.name, owning_interface)

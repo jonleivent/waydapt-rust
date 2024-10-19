@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #[allow(clippy::wildcard_imports)]
 use super::protocol::*;
-use crate::basics::{UnwindDo, LEAKER};
+use crate::basics::{LEAKER, UnwindDo};
 use crate::crate_traits::Alloc;
 use std::cmp::min;
 use std::collections::HashMap;
@@ -278,7 +278,7 @@ impl<'a> Interface<'a> {
     }
 }
 
-impl<'a> Message<'a> {
+impl Message<'_> {
     fn new_id_interface_name(&self) -> Option<&String> {
         let mut new_id_args = self.args.iter().filter(|a| a.typ == Type::NewId);
         let targetless_ok = |name| self.is_wl_registry_bind() && name == "id";
@@ -307,7 +307,7 @@ fn global_limits(filename: &str) -> impl Iterator<Item = (usize, String, u32)> +
     GlobalLimits { filename, line_iter }
 }
 
-impl<'a, LI> Iterator for GlobalLimits<'a, LI>
+impl<LI> Iterator for GlobalLimits<'_, LI>
 where LI: Iterator<Item = (usize, IoResult<String>)>
 {
     type Item = (usize, String, u32);
@@ -347,7 +347,7 @@ where LI: Iterator<Item = (usize, IoResult<String>)>
 pub(crate) struct Foster<'a, T: ?Sized>(pub(crate) &'a T);
 
 use std::fmt;
-impl<'a, T: fmt::Display> fmt::Display for Foster<'a, [T]> {
+impl<T: fmt::Display> fmt::Display for Foster<'_, [T]> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         let mut first = true;

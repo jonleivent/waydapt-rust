@@ -244,7 +244,7 @@ impl<'a> DemarshalledMessage<'a> {
 mod debug {
     use super::{ArgData, AsRawFd, DemarshalledMessage, Info, RInterface};
 
-    impl<'a> DemarshalledMessage<'a> {
+    impl DemarshalledMessage<'_> {
         pub(crate) fn debug_print(&self, info: &impl Info) {
             let mut first = true;
             for arg in &self.args {

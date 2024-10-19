@@ -35,7 +35,7 @@ pub(crate) struct Mediator<'a, S: SessionInitInfo> {
     init_info: &'a S,
 }
 
-impl<'a, S: SessionInitInfo> SessionInitInfo for Mediator<'a, S> {
+impl<S: SessionInitInfo> SessionInitInfo for Mediator<'_, S> {
     #[inline(always)]
     fn ucred(&self) -> Option<rustix::net::UCred> { self.init_info.ucred() }
 
@@ -51,7 +51,7 @@ impl<'a, S: SessionInitInfo> SessionInitInfo for Mediator<'a, S> {
     fn get_debug_level(&self) -> u32 { self.init_info.get_debug_level() }
 }
 
-impl<'a, S: SessionInitInfo> SessionInfo for Mediator<'a, S> {
+impl<S: SessionInitInfo> SessionInfo for Mediator<'_, S> {
     #[inline(always)]
     fn try_lookup(&self, id: u32) -> Option<RInterface> { self.id_map.try_lookup(id) }
 
@@ -108,7 +108,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
                         ) = msg_decl.special.get()
                         {
                             panic!(
-                                "{mod_name}:{group} Attempt to drop {msg_decl}, which is a required message"
+                                "a{mod_name}:{group} Attempt to drop {msg_decl}, which is a required message"
                             )
                         };
                         self.debug_drop(header, msg_decl, from_server, mod_name, *group);
@@ -148,7 +148,7 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
     }
 }
 
-impl<'a> Message<'a> {
+impl Message<'_> {
     pub(crate) fn find_new_id(&self, data: &[u32]) -> u32 {
         // The new_id arg is most often the first arg, so this is usually fast
         let mut i = 2; // bypass 2 header words
@@ -170,7 +170,7 @@ mod debug {
 
     use super::{DemarshalledMessage, Mediator, Message, MessageHeader};
 
-    impl<'a, S: SessionInitInfo> Mediator<'a, S> {
+    impl<S: SessionInitInfo> Mediator<'_, S> {
         fn pidstr(&self) -> String {
             if let Some(c) = self.init_info.ucred() {
                 format!("[{}]", c.pid.as_raw_nonzero())
