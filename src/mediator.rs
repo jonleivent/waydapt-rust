@@ -90,7 +90,8 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
             for (h, group) in handlers {
                 // since we have the mod name, we can debug each h call along with their result - TBD
                 let (ref mod_name, gs) = &mut group_states[*group];
-                match h.handle(&mut dmsg, self, gs) {
+                let ss = &mut **gs; // deref from the Box
+                match h.handle(&mut dmsg, self, ss) {
                     Next => continue,
                     Send => break,
                     Drop => {

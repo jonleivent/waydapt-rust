@@ -51,8 +51,8 @@ mod safeclip {
     };
 
     use crate::for_handlers::{
-        ActiveInterfaces, AddHandler, ArgData, Message, MessageHandlerResult, MessageInfo,
-        SessionInfo, SessionInitHandler, SessionInitInfo, SessionState, Type, MAX_BYTES_OUT,
+        ActiveInterfaces, AddHandler, ArgData, MAX_BYTES_OUT, Message, MessageHandlerResult,
+        MessageInfo, SessionInfo, SessionInitHandler, SessionInitInfo, SessionState, Type,
     };
 
     use super::InitHandlersFun;
@@ -101,7 +101,10 @@ mod safeclip {
     struct SessionInitPrefix(&'static String);
 
     impl SessionInitHandler for SessionInitPrefix {
-        fn init(&self, _: &dyn SessionInitInfo) -> Box<SessionState> { Box::new(self.0) }
+        fn init(&self, _: &dyn SessionInitInfo) -> Box<SessionState> {
+            let prefix = self.0;
+            Box::new(prefix.clone())
+        }
     }
 
     fn init_handler(
@@ -145,7 +148,7 @@ mod safeclip {
     fn add_prefix(
         msg: &mut dyn MessageInfo, _: &mut dyn SessionInfo, state: &mut SessionState,
     ) -> MessageHandlerResult {
-        let prefix: &String = state.downcast_ref().unwrap();
+        let prefix: &String = state.downcast_ref::<String>().unwrap();
         add_prefix_internal(msg, prefix.as_bytes())
     }
 
@@ -187,7 +190,7 @@ mod safeclip {
     fn remove_prefix(
         msg: &mut dyn MessageInfo, _: &mut dyn SessionInfo, state: &mut SessionState,
     ) -> MessageHandlerResult {
-        let prefix: &String = state.downcast_ref().unwrap();
+        let prefix: &String = state.downcast_ref::<String>().unwrap();
         remove_prefix_internal(msg, prefix.as_bytes())
     }
 

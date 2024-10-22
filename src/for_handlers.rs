@@ -41,6 +41,13 @@ pub enum MessageHandlerResult {
     Drop,
 }
 
+// Each addon is responsible for:
+// SessionState type (can be ())
+// InitHandlersFun
+// SessionInitHandler impl (init) - can be Fn
+// multiple MessageHandler impls (handle) - can be Fns
+// - must make sure that SessionState type matches across all above
+
 // There is one InitHandlersFun per addon, and it is called once per group for that addon:
 pub type InitHandlersFun = fn(
     &[String],
@@ -54,6 +61,7 @@ pub trait SessionInitHandler: Sync {
     fn init(&self, session_init_info: &dyn SessionInitInfo) -> Box<SessionState>;
 }
 
+// Null state case:
 impl SessionInitHandler for () {
     fn init(&self, _: &dyn SessionInitInfo) -> Box<SessionState> { Box::new(()) }
 }
