@@ -1,15 +1,15 @@
 use crate::basics::Leaker;
 use crate::crate_traits::Alloc;
 use crate::for_handlers::InitHandlersFun;
-use crate::handlers::{gather_handlers, SessionHandlers};
+use crate::handlers::{SessionHandlers, gather_handlers};
 use crate::listener::SocketListener;
-use crate::postparse::{active_interfaces, ActiveInterfaces};
+use crate::postparse::{ActiveInterfaces, active_interfaces};
 use crate::session::client_session;
 use crate::socket_events::SocketEventHandler;
 use getopts::{Matches, Options, ParsingStyle};
 use nix::sys::pthread;
 use nix::sys::signal;
-use rustix::fs::{flock, FlockOperation};
+use rustix::fs::{FlockOperation, flock};
 use signal::Signal;
 use std::collections::HashMap;
 use std::env::Args;
@@ -175,7 +175,7 @@ fn protocol_file_iter<'a>(
             let f = f.unwrap().path();
             match f.extension() {
                 // only files with xml extension in protocol dirs:
-                Some(e) if e.to_ascii_lowercase() == "xml" => Some(f),
+                Some(e) if e.eq_ignore_ascii_case("xml") => Some(f),
                 _ => None,
             }
         })
