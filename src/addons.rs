@@ -1,7 +1,7 @@
 use crate::for_handlers::InitHandlersFun;
 
 // For now, we require that all addons add a pair element to this:
-pub const ALL_ADDONS: &[(&str, InitHandlersFun)] = &[("safeclip", safeclip::INIT_HANDLER)];
+pub const ALL_ADDONS: &[(&str, InitHandlersFun)] = &[("safeclip", safeclip::init_handlers)];
 
 /// Example addon: `SafeClip`
 ///
@@ -55,8 +55,6 @@ mod safeclip {
         MessageInfo, SessionInfo, SessionInitHandler, SessionInitInfo, SessionState, Type,
     };
 
-    use super::InitHandlersFun;
-
     #[inline]
     fn has_mime_type_arg(msg: &Message<'_>) -> bool {
         msg.args.iter().any(|a| a.typ == Type::String && a.name == "mime_type")
@@ -98,16 +96,16 @@ mod safeclip {
         }
     }
 
-    struct SessionInitPrefix(&'static String);
+    struct SessionInit(&'static String);
 
-    impl SessionInitHandler for SessionInitPrefix {
+    impl SessionInitHandler for SessionInit {
         fn init(&self, _: &dyn SessionInitInfo) -> Box<SessionState> {
             let prefix = self.0;
             Box::new(prefix.clone())
         }
     }
 
-    fn init_handler(
+    pub(super) fn init_handlers(
         args: &[String], adder: &mut dyn AddHandler, active_interfaces: &'static ActiveInterfaces,
     ) -> &'static dyn SessionInitHandler {
         // Unlike the C waydapt, the 0th arg is NOT the dll name, it is our first arg.
@@ -139,11 +137,9 @@ mod safeclip {
             }
         }
 
-        let f = Box::leak(Box::new(SessionInitPrefix(prefix)));
+        let f = Box::leak(Box::new(SessionInit(prefix)));
         f
     }
-
-    pub(super) const INIT_HANDLER: InitHandlersFun = init_handler;
 
     fn add_prefix(
         msg: &mut dyn MessageInfo, _: &mut dyn SessionInfo, state: &mut SessionState,
