@@ -16,7 +16,7 @@ default = [ "always_compact", "fast_compact", "limit_sends", "forking" ]
 arrayvec = "0.7.4"
 getopts = "0.2.21"
 num_threads = "0.1.7"
-quick-xml = "0.31.0"
+quick-xml = "0.37.1"
 smallvec = "1.13.2"
 
 [build-dependencies.vergen-gitcl]

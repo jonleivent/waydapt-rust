@@ -15,7 +15,8 @@ use quick_xml::{
 
 pub(crate) fn parse<S: Read>(stream: S, alloc: &impl Alloc) -> &Protocol {
     let mut reader = Reader::from_reader(BufReader::new(stream));
-    reader.trim_text(true).expand_empty_elements(true);
+    reader.config_mut().trim_text(true);
+    reader.config_mut().expand_empty_elements = true;
     // Skip first <?xml ... ?> event
     if let Ok(Event::Decl(_d)) = reader.read_event_into(&mut Vec::new()) {
         // TBD: maybe check _d?
