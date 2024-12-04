@@ -2,3 +2,6 @@
 *~
 /data
 
+.cvsignore
+src/.rustfmt.toml
+src/.vscode
