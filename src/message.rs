@@ -414,12 +414,12 @@ mod test {
         *dm.get_arg_mut(2) = ArgData::Fixed(0x9ace_1357_u32 as i32);
         fmm.mod_scalar_arg(2, 0x9ace_1357);
 
-        let ArgData::String(ref mut c) = dm.get_arg_mut(3) else { panic!() };
+        let &mut ArgData::String(ref mut c): &mut ArgData<'_> = dm.get_arg_mut(3) else { panic!() };
         let c2 = c"ABCDIJKLQRST";
         *c = c2.into();
         fmm.mod_vector_arg(3, c2.to_bytes_with_nul());
 
-        let ArgData::Array(ref mut a) = dm.get_arg_mut(5) else { panic!() };
+        let &mut ArgData::Array(ref mut a) = dm.get_arg_mut(5) else { panic!() };
         let a2 = b"abcd01234567890!";
         *a = a2.into();
         fmm.mod_vector_arg(5, a2);

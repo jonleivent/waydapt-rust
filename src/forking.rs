@@ -26,8 +26,8 @@ pub(crate) unsafe fn double_fork() -> nix::Result<ForkResult> {
     match unsafe { fork() } {
         Ok(ForkResult::Child) => match unsafe { fork() } {
             c @ Ok(ForkResult::Child) => c,
-            Ok(ForkResult::Parent { .. }) => libc::_exit(0),
-            Err(_) => libc::_exit(-1),
+            Ok(ForkResult::Parent { .. }) => unsafe { libc::_exit(0) },
+            Err(_) => unsafe { libc::_exit(-1) },
         },
         p @ Ok(ForkResult::Parent { child, .. }) => {
             waitpid(Some(child), Some(WaitPidFlag::empty()))?;
@@ -40,7 +40,7 @@ pub(crate) unsafe fn double_fork() -> nix::Result<ForkResult> {
 pub(crate) unsafe fn daemonize() -> nix::Result<ForkResult> {
     check_single_threaded();
     match unsafe { fork() } {
-        Ok(ForkResult::Parent { .. }) => libc::_exit(0),
+        Ok(ForkResult::Parent { .. }) => unsafe { libc::_exit(0) },
         r => r,
     }
 }
