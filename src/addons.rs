@@ -223,35 +223,16 @@ mod safeclip {
             basics::MAX_WORDS_OUT,
             buffers::privates::Chunk,
             for_handlers::{
-                MessageHandlerResult, MessageInfo, RInterface, SessionInfo, SessionInitInfo,
+                MessageHandlerResult, MessageInfo,
             },
             header::MessageHeader,
             message::{ArgData, DemarshalledMessage},
-            postparse::ActiveInterfaces,
             test_utils::*,
         };
 
         use super::*;
         // TBD: Test how add_prefix works when the msg would become too long with the added prefix.
         // Use a msg with a mime_type or title string arg and another arg that is a very long array.
-
-        struct FakeSessionInfo(Vec<(u32, RInterface)>);
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        impl SessionInitInfo for FakeSessionInfo {
-            fn ucred(&self) -> Option<rustix::net::UCred> { None }
-            fn get_active_interfaces(&self) -> &'static ActiveInterfaces { todo!() }
-            fn get_display(&self) -> RInterface { todo!() } // wl_display
-            fn get_debug_level(&self) -> u32 { 0 }
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        impl SessionInfo for FakeSessionInfo {
-            fn try_lookup(&self, _id: u32) -> Option<RInterface> { None }
-            fn lookup(&self, _id: u32) -> RInterface { todo!() }
-            fn add(&mut self, id: u32, interface: RInterface) { self.0.push((id, interface)); }
-            fn delete(&mut self, _id: u32) {}
-        }
 
         #[test]
         fn test_add_prefix_overflow1() {
