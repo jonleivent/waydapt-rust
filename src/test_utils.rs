@@ -176,14 +176,14 @@ pub(crate) struct FakeSessionInfo(pub(crate) Vec<(u32, RInterface)>);
 
 impl SessionInitInfo for FakeSessionInfo {
     fn ucred(&self) -> Option<rustix::net::UCred> { None }
-    fn get_active_interfaces(&self) -> &'static ActiveInterfaces { todo!() }
-    fn get_display(&self) -> RInterface { todo!() } // wl_display
+    fn get_active_interfaces(&self) -> &'static ActiveInterfaces { unimplemented!() }
+    fn get_display(&self) -> RInterface { unimplemented!() } // wl_display
     fn get_debug_level(&self) -> u32 { 0 }
 }
 
 impl SessionInfo for FakeSessionInfo {
     fn try_lookup(&self, _id: u32) -> Option<RInterface> { None }
-    fn lookup(&self, _id: u32) -> RInterface { todo!() }
+    fn lookup(&self, _id: u32) -> RInterface { unimplemented!() }
     fn add(&mut self, id: u32, interface: RInterface) { self.0.push((id, interface)); }
     fn delete(&mut self, _id: u32) {}
 }
@@ -210,6 +210,6 @@ impl Messenger for FakeMessenger {
     fn send_raw(
         &mut self, _fds: impl IntoIterator<Item = OwnedFd>, _raw_msg: &[u32],
     ) -> IoResult<usize> {
-        todo!()
+        unimplemented!()
     }
 }
