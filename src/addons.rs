@@ -296,11 +296,3 @@ mod safeclip {
         }
     }
 }
-
-// TBD: maybe add another addon module that is just for testing.  This would allow us to test
-// session init handlers, which safeclip doesn't use.
-
-// Do we really need session init handlers?  Each addon could have a thread_local static LazyCell.
-// The issue would be that in multi-thread mode, one thread might block the other while initing the
-// LazyCell.  Also, it might be useful for certain addons to do some session initialization before
-// any messages are sent, especially when we add origination.

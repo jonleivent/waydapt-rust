@@ -10,7 +10,6 @@ use std::collections::VecDeque;
 use std::io::Result as IoResult;
 use std::os::unix::io::{AsFd, OwnedFd};
 
-const LIMIT_SENDS_TO_MAX_WORDS_OUT: bool = cfg!(feature = "limit_sends");
 const FAST_COMPACT: bool = cfg!(feature = "fast_compact");
 const ALWAYS_COMPACT: bool = cfg!(feature = "always_compact");
 
@@ -158,6 +157,7 @@ fn initial_chunks() -> Chunks {
 }
 
 const MUST_HAVE1: &str = "active_chunks must always have at least 1 element";
+const LIMIT_SENDS_TO_MAX_WORDS_OUT: bool = cfg!(feature = "limit_sends");
 
 impl<'a> OutBuffer<'a> {
     pub(crate) fn new(stream: &'a IOStream) -> Self {
