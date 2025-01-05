@@ -37,8 +37,8 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::
         for Event { flags, data } in &events {
             #[allow(clippy::cast_possible_truncation)]
             let i = data.u64() as usize;
-            // Since we do input and output on the same fds, we should first do output, as that happens
-            // fastest and doesn't have to wait on handler execution.
+            // Since we do input and output on the same fds, we should first do output, as that
+            // happens fastest and doesn't have to wait on handler execution.
             if flags.contains(EventFlags::OUT) {
                 event_handler.handle_output(i)?;
             }

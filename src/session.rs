@@ -44,7 +44,7 @@ impl<'a> Session<'a> {
     }
 }
 
-impl<'a> EventHandler for Session<'a> {
+impl EventHandler for Session<'_> {
     type InputResult = ();
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
