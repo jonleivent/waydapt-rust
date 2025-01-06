@@ -49,7 +49,8 @@ impl EventHandler for Session<'_> {
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         self.fds
-            .into_iter()
+            .iter()
+            .copied()
             .zip(std::iter::repeat(EventFlags::IN | EventFlags::OUT | EventFlags::ET))
     }
 
