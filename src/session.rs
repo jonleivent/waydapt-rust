@@ -3,7 +3,7 @@
 use rustix::event::epoll::EventFlags;
 
 use crate::buffers::{InBuffer, OutBuffer};
-use crate::crate_traits::EventHandler;
+use crate::event_loop::EventHandler;
 use crate::for_handlers::SessionInitInfo;
 use crate::handlers::SessionHandlers;
 use crate::mediator::Mediator;
@@ -57,9 +57,7 @@ impl EventHandler for Session<'_> {
         // By trying receive repeatedly until there's nothing left, we can use edge triggered IN
         // events, which may give higher performance:
         // https://thelinuxcode.com/epoll-7-c-function/
-        let (source_side, dest_side) = (index, 1 - index);
-        let inbuf = &mut self.in_buffers[source_side];
-        let outbuf = &mut self.out_buffers[dest_side];
+        let inbuf = &mut self.in_buffers[index];
         let group_states = &mut self.group_states;
         let mut received = false;
 
@@ -70,14 +68,16 @@ impl EventHandler for Session<'_> {
                 received = true;
                 // We need to pass index into handle so it knows whether the msg is a request or
                 // event.
-                self.mediator.mediate(source_side, msg, fds, outbuf, group_states)?;
+                self.mediator.mediate(index, msg, fds, &mut self.out_buffers, group_states)?;
             }
         }
 
         if received {
-            // Force flush because we don't know when we will be back here, so waiting to
-            // flush any part might starve the receiver.
-            outbuf.flush(true)?;
+            // Force flush because we don't know when we will be back here, so waiting to flush any
+            // part might starve the receiver.  Flushing when we don't have to is basically a no-op,
+            // so there's no big need to test further than the received flag.
+            self.out_buffers[0].flush(true)?;
+            self.out_buffers[1].flush(true)?;
         }
         Ok(None)
     }

@@ -1,4 +1,4 @@
-use crate::crate_traits::EventHandler;
+use crate::event_loop::EventHandler;
 use crate::handlers::SessionHandlers;
 use crate::listener::SocketListener;
 use crate::postparse::ActiveInterfaces;
@@ -75,7 +75,7 @@ impl SocketEventHandler {
 
         #[cfg(feature = "forking")]
         if self.options.fork_mode {
-            use crate::forking::{double_fork, ForkResult};
+            use crate::forking::{ForkResult, double_fork};
             #[allow(unsafe_code)]
             return match unsafe { double_fork() } {
                 // The child runs as if in single_mode:
@@ -98,9 +98,7 @@ impl SocketEventHandler {
 }
 
 impl Drop for SocketEventHandler {
-    fn drop(&mut self) {
-        let _ = SigSet::all().thread_unblock();
-    }
+    fn drop(&mut self) { let _ = SigSet::all().thread_unblock(); }
 }
 
 impl EventHandler for SocketEventHandler {
@@ -108,7 +106,9 @@ impl EventHandler for SocketEventHandler {
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         let flags = EventFlags::IN; // level triggered
-        let mut v = vec![(self.listener.as_fd(), flags), (self.signalfd.as_fd(), flags)];
+        let mut v = Vec::new();
+        v.push((self.listener.as_fd(), flags));
+        v.push((self.signalfd.as_fd(), flags));
         if let Some(ref server_stream) = self.server_stream {
             v.push((server_stream.as_fd(), flags));
             // EventFlags::empty() also works, but then we only get the HUP, not any input

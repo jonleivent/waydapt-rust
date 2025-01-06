@@ -1,11 +1,59 @@
 #![forbid(unsafe_code)]
 
-use crate::crate_traits::EventHandler;
+//# This might become its own crate
+
 use epoll::{CreateFlags, Event, EventData, EventFlags, EventVec};
 use rustix::event::epoll;
-use std::io::Result as IoResult;
+use std::{io::Result as IoResult, os::fd::BorrowedFd};
 
-pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::InputResult> {
+pub trait EventHandler {
+    type InputResult;
+
+    fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)>;
+
+    /// TBD: maybe this should return `ControlFlow<IoResult<Self::InputResult>>` instead?
+    ///
+    /// Returning `Ok(Some(value))` will cause that value to be returned from `event_loop`
+    ///
+    /// Returning `Ok(None)` will continue the `event_loop`
+    ///
+    /// # Errors
+    ///
+    /// Propagate any IO Error
+    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<Self::InputResult>>;
+
+    /// # Errors
+    ///
+    /// Propagate any IO Error
+    fn handle_output(&mut self, fd_index: usize) -> IoResult<()>;
+
+    /// # Errors
+    ///
+    /// Determines error from flags.  Is allowed to return `Ok(None)` when the error can be ignored
+    /// safely.
+    fn handle_error(&mut self, _fd_index: usize, flags: EventFlags) -> IoResult<()> {
+        use std::io::{Error, ErrorKind};
+        if flags == EventFlags::HUP {
+            Err(Error::new(ErrorKind::ConnectionAborted, "normal HUP termination"))
+        } else {
+            Err(Error::new(
+                ErrorKind::ConnectionAborted,
+                format!("event flags: {:?}", flags.iter_names().collect::<Vec<_>>()),
+            ))
+        }
+    }
+}
+
+/// # Panics
+///
+/// Panics only in the unexpected case of not receiving any events from `epoll` on return from
+/// `epoll::wait`
+///
+/// # Errors
+///
+/// propagates returned errors from `EventHandler` trait functions
+///
+pub fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::InputResult> {
     let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
     let mut count = 0;
     {
@@ -14,13 +62,15 @@ pub(crate) fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::
         for (fd, flags) in fds_flags {
             let data = EventData::new_u64(count as u64);
             epoll::add(&epoll_fd, fd, data, flags)?;
+            // keep track of edge-triggered inputs for loop below, which needs to be separate from
+            // this loop to satisfy the borrow checker:
             if flags.contains(EventFlags::IN | EventFlags::ET) {
                 etinputs.push(count);
             }
             count += 1;
         }
+        // for edge-triggered inputs, we may miss initial state, so try it here:
         for i in etinputs {
-            // if input is edge-triggered, we may miss initial state, so try it here:
             event_handler.handle_input(i)?;
         }
     }

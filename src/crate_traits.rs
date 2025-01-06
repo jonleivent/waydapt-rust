@@ -1,8 +1,7 @@
 #![allow(clippy::inline_always)]
 
-use rustix::event::epoll::EventFlags;
 use std::io::Result as IoResult;
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 use crate::buffers::ExtendChunk;
 use crate::header::MessageHeader;
@@ -27,26 +26,4 @@ pub(crate) trait Messenger {
     fn send_raw(
         &mut self, fds: impl IntoIterator<Item = OwnedFd>, raw_msg: &[u32],
     ) -> IoResult<usize>;
-}
-
-pub(crate) trait EventHandler {
-    type InputResult;
-
-    fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)>;
-
-    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<Self::InputResult>>;
-
-    fn handle_output(&mut self, fd_index: usize) -> IoResult<()>;
-
-    fn handle_error(&mut self, _fd_index: usize, flags: EventFlags) -> IoResult<()> {
-        use std::io::{Error, ErrorKind};
-        if flags == EventFlags::HUP {
-            Err(Error::new(ErrorKind::ConnectionAborted, "normal HUP termination"))
-        } else {
-            Err(Error::new(
-                ErrorKind::ConnectionAborted,
-                format!("event flags: {:?}", flags.iter_names().collect::<Vec<_>>()),
-            ))
-        }
-    }
 }

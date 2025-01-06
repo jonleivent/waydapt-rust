@@ -74,11 +74,12 @@ impl<'a, S: SessionInitInfo> Mediator<'a, S> {
     }
 
     pub(crate) fn mediate(
-        &mut self, index: usize, in_msg: &[u32], in_fds: &mut impl FdInput, out: &mut OutBuffer,
-        group_states: &mut [(String, Box<dyn Any>)],
+        &mut self, index: usize, in_msg: &[u32], in_fds: &mut impl FdInput,
+        outs: &mut [OutBuffer; 2], group_states: &mut [(String, Box<dyn Any>)],
     ) -> IoResult<()> {
         // The demarshalling and remarshalling, along with message handlers:
         let from_server = index > 0;
+        let out = &mut outs[1 - index];
         let header = MessageHeader::new(in_msg);
         debug_assert_eq!(header.msg_nwords(), in_msg.len());
         let interface = self.lookup(header.object_id);
