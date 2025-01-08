@@ -1,4 +1,4 @@
-use crate::event_loop::EventHandler;
+use crate::event_loop::{EventHandler, ElResult, EventLoopFlow};
 use crate::handlers::SessionHandlers;
 use crate::listener::SocketListener;
 use crate::postparse::ActiveInterfaces;
@@ -8,7 +8,7 @@ use nix::sys::signal;
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use rustix::event::epoll::EventFlags;
 use signal::{SigSet, Signal};
-use std::io::{Error, ErrorKind, Result as IoResult};
+use std::io::{Error, ErrorKind};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 
@@ -57,19 +57,19 @@ impl SocketEventHandler {
         }
     }
 
-    fn handle_signal_input(&self) -> IoResult<Option<UnixStream>> {
+    fn handle_signal_input(&self) -> ElResult<UnixStream> {
         #[allow(clippy::cast_possible_wrap)]
         match self.signalfd.read_signal() {
             Ok(Some(ref sig)) => Err(Self::err_for_signo(sig.ssi_signo as i32)),
-            Ok(None) => Ok(None),
+            Ok(None) => Ok(EventLoopFlow::Continue),
             Err(e) => Err(e.into()),
         }
     }
 
-    fn handle_listener_input(&self) -> IoResult<Option<UnixStream>> {
+    fn handle_listener_input(&self) -> ElResult<UnixStream> {
         let client_stream = match self.listener.accept() {
             Ok((client_stream, _)) => client_stream,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(EventLoopFlow::Continue),
             Err(e) => return Err(e),
         };
 
@@ -79,20 +79,20 @@ impl SocketEventHandler {
             #[allow(unsafe_code)]
             return match unsafe { double_fork() } {
                 // The child runs as if in single_mode:
-                Ok(ForkResult::Child) => Ok(Some(client_stream)),
+                Ok(ForkResult::Child) => Ok(EventLoopFlow::Return(client_stream)),
                 // The parent continues its event loop:
-                Ok(ForkResult::Parent { .. }) => Ok(None),
+                Ok(ForkResult::Parent { .. }) => Ok(EventLoopFlow::Continue),
                 Err(e) => Err(e.into()),
             };
         }
 
         if self.options.single_mode {
             // let the top-level in setup run the client session after the socket and epoll fds are closed:
-            Ok(Some(client_stream))
+            Ok(EventLoopFlow::Return(client_stream))
         } else {
             // spawn the client session and allow the event handler to continue:
             self.spawn_session(client_stream);
-            Ok(None)
+            Ok(EventLoopFlow::Continue)
         }
     }
 }
@@ -102,7 +102,7 @@ impl Drop for SocketEventHandler {
 }
 
 impl EventHandler for SocketEventHandler {
-    type InputResult = UnixStream;
+    type ResultType = UnixStream;
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)> {
         let flags = EventFlags::IN; // level triggered
@@ -116,7 +116,7 @@ impl EventHandler for SocketEventHandler {
         v.into_iter()
     }
 
-    fn handle_input(&mut self, fd_index: usize) -> IoResult<Option<UnixStream>> {
+    fn handle_input(&mut self, fd_index: usize) -> ElResult<UnixStream> {
         match fd_index {
             0 => self.handle_listener_input(),
             1 => self.handle_signal_input(),
@@ -126,7 +126,7 @@ impl EventHandler for SocketEventHandler {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn handle_output(&mut self, _fd_index: usize) -> IoResult<()> {
+    fn handle_output(&mut self, _fd_index: usize) -> ElResult<UnixStream> {
         unreachable!("We didn't ask for no output!")
     }
 }
