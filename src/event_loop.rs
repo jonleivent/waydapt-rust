@@ -19,10 +19,6 @@ pub trait EventHandler {
 
     fn fds_to_monitor(&self) -> impl Iterator<Item = (BorrowedFd<'_>, EventFlags)>;
 
-    /// Returning `Ok(Some(value))` will cause that value to be returned from `event_loop`
-    ///
-    /// Returning `Ok(None)` will continue the `event_loop`
-    ///
     /// # Errors
     ///
     /// Propagate any IO Error
@@ -62,6 +58,7 @@ pub trait EventHandler {
 pub fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::ResultType> {
     'restart: loop {
         let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
+        let mut restart = false;
         let mut count = 0;
         {
             let mut etinputs = Vec::new();
@@ -80,9 +77,12 @@ pub fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::ResultT
             for i in etinputs {
                 match event_handler.handle_input(i)? {
                     EventLoopFlow::Return(x) => return Ok(x),
-                    EventLoopFlow::RefreshFDs => continue 'restart,
+                    EventLoopFlow::RefreshFDs => restart = true,
                     EventLoopFlow::Continue => {}
                 }
+            }
+            if restart {
+                continue 'restart;
             }
         }
         debug_assert!(count > 0);
@@ -103,14 +103,14 @@ pub fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::ResultT
                 if flags.contains(EventFlags::OUT) {
                     match event_handler.handle_output(i)? {
                         EventLoopFlow::Return(x) => return Ok(x),
-                        EventLoopFlow::RefreshFDs => continue 'restart,
+                        EventLoopFlow::RefreshFDs => restart = true,
                         EventLoopFlow::Continue => {}
                     }
                 }
                 if flags.contains(EventFlags::IN) {
                     match event_handler.handle_input(i)? {
                         EventLoopFlow::Return(x) => return Ok(x),
-                        EventLoopFlow::RefreshFDs => continue 'restart,
+                        EventLoopFlow::RefreshFDs => restart = true,
                         EventLoopFlow::Continue => {}
                     }
                 }
@@ -118,10 +118,13 @@ pub fn event_loop<E: EventHandler>(event_handler: &mut E) -> IoResult<E::ResultT
                 if !error_flags.is_empty() {
                     match event_handler.handle_error(i, error_flags)? {
                         EventLoopFlow::Return(x) => return Ok(x),
-                        EventLoopFlow::RefreshFDs => continue 'restart,
+                        EventLoopFlow::RefreshFDs => restart = true,
                         EventLoopFlow::Continue => {}
                     }
                 }
+            }
+            if restart {
+                continue 'restart;
             }
             events.clear(); // may not be needed
         }
